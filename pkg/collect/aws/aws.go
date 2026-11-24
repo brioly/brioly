@@ -32,6 +32,10 @@ import (
 
 // Options configures an AWS scan.
 type Options struct {
+	// Config, when set, is used as it is (its region is replaced per scanned
+	// region): the caller brings the credentials, for example those of a
+	// role it assumed. Profile is then ignored.
+	Config  *aws.Config
 	Profile string // shared config profile; empty uses the default credential chain
 	Regions []string
 	Now     func() time.Time
@@ -116,13 +120,19 @@ func Collect(ctx context.Context, opts Options) (collect.Result, error) {
 	if len(opts.Regions) == 0 {
 		return collect.Result{}, errors.New("aws: no regions configured")
 	}
-	loadOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(opts.Regions[0])}
-	if opts.Profile != "" {
-		loadOpts = append(loadOpts, awsconfig.WithSharedConfigProfile(opts.Profile))
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
-	if err != nil {
-		return collect.Result{}, fmt.Errorf("aws: load credentials: %w", err)
+	var cfg aws.Config
+	if opts.Config != nil {
+		cfg = opts.Config.Copy()
+		cfg.Region = opts.Regions[0]
+	} else {
+		loadOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(opts.Regions[0])}
+		if opts.Profile != "" {
+			loadOpts = append(loadOpts, awsconfig.WithSharedConfigProfile(opts.Profile))
+		}
+		var err error
+		if cfg, err = awsconfig.LoadDefaultConfig(ctx, loadOpts...); err != nil {
+			return collect.Result{}, fmt.Errorf("aws: load credentials: %w", err)
+		}
 	}
 	ident, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {

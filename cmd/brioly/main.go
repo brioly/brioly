@@ -21,17 +21,13 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/brioly/brioly/pkg/collect"
-	awscollect "github.com/brioly/brioly/pkg/collect/aws"
-	"github.com/brioly/brioly/pkg/collect/code"
-	"github.com/brioly/brioly/pkg/collect/kube"
 	"github.com/brioly/brioly/pkg/components"
 	"github.com/brioly/brioly/pkg/config"
 	"github.com/brioly/brioly/pkg/diff"
 	"github.com/brioly/brioly/pkg/enrich"
 	"github.com/brioly/brioly/pkg/facts"
-	"github.com/brioly/brioly/pkg/redact"
 	"github.com/brioly/brioly/pkg/render"
+	"github.com/brioly/brioly/pkg/scan"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -193,61 +189,6 @@ func generate(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 // OnboardingFile is the onboarding guide written by the LLM step.
 const OnboardingFile = "onboarding.md"
 
-func scan(ctx context.Context, cfg *config.Config, stderr io.Writer) (*facts.Snapshot, error) {
-	var res collect.Result
-	for _, repo := range cfg.Sources.Repos {
-		fmt.Fprintf(stderr, "scanning repository %s\n", repo.Path)
-		r, err := code.Collect(code.Options{Path: repo.Path, Name: repo.Name})
-		if err != nil {
-			return nil, err
-		}
-		res.Merge(r)
-	}
-	if a := cfg.Sources.AWS; a != nil {
-		fmt.Fprintf(stderr, "scanning AWS (%v)\n", a.Regions)
-		r, err := awscollect.Collect(ctx, awscollect.Options{Profile: a.Profile, Regions: a.Regions})
-		if err != nil {
-			return nil, err
-		}
-		res.Merge(r)
-	}
-	if k := cfg.Sources.Kubernetes; k != nil {
-		opts := kube.Options{Endpoints: res.Endpoints, ExcludeNamespaces: k.ExcludeNamespaces}
-		found := map[string]collect.KubeCluster{} // API server host -> cluster the cloud scan found
-		for _, c := range res.Clusters {
-			found[kube.ServerHost(c.Server)] = c
-		}
-		read := map[string]bool{}
-		if k.Kubeconfig != "" {
-			targets, err := kube.LoadKubeconfig(k.Kubeconfig, k.Contexts)
-			if err != nil {
-				return nil, err
-			}
-			for _, t := range targets {
-				host := kube.ServerHost(t.Cluster.Server)
-				// The same API server the cloud scan found: one cluster,
-				// described by the cloud's fact.
-				if c, ok := found[host]; ok {
-					t.Cluster.FactID, t.Cluster.Name, t.Cluster.Scope, t.Cluster.Region = c.FactID, c.Name, c.Scope, c.Region
-				}
-				read[host] = true
-				fmt.Fprintf(stderr, "scanning Kubernetes cluster %s (kubeconfig context %s)\n", t.Cluster.Name, t.Context)
-				res.Merge(scanTarget(ctx, t, opts))
-			}
-		}
-		if k.EKS {
-			for _, cluster := range res.Clusters {
-				if read[kube.ServerHost(cluster.Server)] {
-					continue
-				}
-				fmt.Fprintf(stderr, "scanning Kubernetes cluster %s\n", cluster.Name)
-				res.Merge(scanCluster(ctx, cluster, opts))
-			}
-		}
-	}
-	return &facts.Snapshot{Facts: res.Facts, Edges: res.Edges, Coverage: res.Coverage}, nil
-}
-
 // snapshot scans the configured sources and returns a finalized snapshot
 // with secrets masked and components built.
 func snapshot(ctx context.Context, cfg *config.Config, stderr io.Writer) (*facts.Snapshot, error) {
@@ -255,73 +196,28 @@ func snapshot(ctx context.Context, cfg *config.Config, stderr io.Writer) (*facts
 	if err != nil {
 		return nil, err
 	}
-	started := time.Now().UTC()
-	snap, err := scan(ctx, cfg, stderr)
-	if err != nil {
-		return nil, err
-	}
-	// After an interrupt the remaining API calls fail fast and the scan looks
-	// merely incomplete; do not overwrite documents with it.
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("scan interrupted; documents were not changed: %w", err)
-	}
-
-	r, err := redact.New()
-	if err != nil {
-		return nil, fmt.Errorf("load secret rules: %w", err)
-	}
-	masked := r.Snapshot(snap)
-	if n := reg.ApplyIgnore(snap); n > 0 {
-		fmt.Fprintf(stderr, "ignored %d resource(s) matching the components file\n", n)
-	}
-	snap.LabelAllow = cfg.Labels.Allow
-	snap.StartedAt, snap.FinishedAt = started, time.Now().UTC()
-	snap.ID = "local-" + started.Format("20060102T150405Z")
-	snap.CollectorVersion = version
-	if err := snap.Finalize(); err != nil {
-		return nil, err
-	}
-	// What this scan could not read is kept from the last one, marked as
-	// stale, instead of vanishing from the documents.
+	// What this scan cannot read is kept from the last one.
 	prev, err := loadSnapshot(filepath.Join(cfg.Output, render.FactsFile))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintln(stderr, "warning: the previous facts.json could not be read, so nothing is kept from it:", err)
-	}
-	if err == nil {
-		if nf, ne := snap.CarryForward(prev); nf+ne > 0 {
-			fmt.Fprintf(stderr, "kept %d resource(s) and %d relationship(s) from the previous scan for the parts that could not be read\n", nf, ne)
-			reg.ApplyIgnore(snap)
-			if err := snap.Finalize(); err != nil {
-				return nil, err
-			}
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(stderr, "warning: the previous facts.json could not be read, so nothing is kept from it:", err)
 		}
+		prev = nil
 	}
-	for _, w := range components.Build(snap, reg) {
-		fmt.Fprintln(stderr, "warning:", w)
+	opts := scan.Options{
+		Registry: reg, LabelAllow: cfg.Labels.Allow, Previous: prev, CollectorVersion: version,
+		Log: func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) },
 	}
-	// What people wrote in the components file ends up in documents and
-	// prompts, so it is masked like everything else.
-	mask := func(s *string) {
-		if v, changed := r.String(*s); changed {
-			*s = v
-			masked++
-		}
+	for _, r := range cfg.Sources.Repos {
+		opts.Repos = append(opts.Repos, scan.Repo{Path: r.Path, Name: r.Name})
 	}
-	for i := range snap.Components {
-		mask(&snap.Components[i].Name)
-		mask(&snap.Components[i].Owner)
+	if a := cfg.Sources.AWS; a != nil {
+		opts.AWS = &scan.AWS{Profile: a.Profile, Regions: a.Regions}
 	}
-	for i := range snap.Annotations {
-		a := &snap.Annotations[i]
-		mask(&a.Body)
-		mask(&a.Author)
-		mask(&a.TargetName)
-		a.ID = facts.AnnotationID(a.Target, a.Body) // never derived from unmasked text
+	if k := cfg.Sources.Kubernetes; k != nil {
+		opts.Kubernetes = &scan.Kubernetes{EKS: k.EKS, Kubeconfig: k.Kubeconfig, Contexts: k.Contexts, ExcludeNamespaces: k.ExcludeNamespaces}
 	}
-	if masked > 0 {
-		fmt.Fprintf(stderr, "warning: masked %d value(s) that looked like secrets\n", masked)
-	}
-	return snap, snap.Finalize()
+	return scan.Run(ctx, opts)
 }
 
 func saveHistory(dir, outputDir string, snap *facts.Snapshot) error {
@@ -471,32 +367,4 @@ func saveWritten(path string, st *enrich.State) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
-}
-
-// scanCluster opens one cluster's API server and reads it. A cluster that
-// cannot be opened is recorded as coverage, not as a failure of the scan.
-func scanCluster(ctx context.Context, cluster collect.KubeCluster, opts kube.Options) collect.Result {
-	token, err := cluster.Token(ctx)
-	if err != nil {
-		return kube.Unreachable(cluster, err)
-	}
-	client, err := kube.NewClient(cluster.Server, cluster.CAData, kube.Credentials{Token: token})
-	if err != nil {
-		return kube.Unreachable(cluster, err)
-	}
-	return kube.Collect(ctx, client, cluster, opts)
-}
-
-// scanTarget reads a cluster named by a kubeconfig context with the
-// credentials that context names.
-func scanTarget(ctx context.Context, t kube.Target, opts kube.Options) collect.Result {
-	creds, err := t.Credentials(ctx)
-	if err != nil {
-		return kube.Unreachable(t.Cluster, err)
-	}
-	client, err := kube.NewClient(t.Cluster.Server, t.Cluster.CAData, creds, kube.ClientOptions{Insecure: t.Insecure})
-	if err != nil {
-		return kube.Unreachable(t.Cluster, err)
-	}
-	return kube.Collect(ctx, client, t.Cluster, opts)
 }

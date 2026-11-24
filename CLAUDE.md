@@ -92,7 +92,8 @@
 
 | 경로 | 역할 |
 |---|---|
-| `cmd/brioly` | CLI (`generate`, `components init`, `diff`, `replay`, `version`) |
+| `cmd/brioly` | CLI (`generate`, `components init`, `diff`, `replay`, `version`). 설정을 읽어 `pkg/scan`을 부르고 결과를 파일로 씀 |
+| `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role) |
 | `pkg/facts` | Fact·Edge·Component·Snapshot, kind 레지스트리(`kinds.go`: 속성 등급), 결정적 ID, structural·detail 해시, `Finalize` |
 | `pkg/components` | 앵커 기반 컴포넌트 묶기(규칙), `components.yaml` 레지스트리 |
 | `pkg/diff` | 스냅샷 비교, 변경 이벤트, severity 규칙, 속성 변동 집계 |
