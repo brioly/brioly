@@ -1,0 +1,39 @@
+# Secrets & local credentials
+.env
+.env.*
+!.env.example
+*.pem
+credentials
+.brioly/
+
+# brioly generate output and configuration of local runs in this checkout
+brioly-docs/
+/brioly.yaml
+/components.yaml
+/brioly-history/
+
+# Local Claude Code context (private notes, personal skills)
+CLAUDE.local.md
+.claude/
+
+# Private research data: interview notes, partner info, golden sets with real infra details
+private/
+
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

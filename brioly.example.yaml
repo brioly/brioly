@@ -1,0 +1,40 @@
+# brioly.yaml — copy to brioly.yaml and adjust.
+#
+# This file holds references to secrets only (${VAR}). Values are read from,
+# in order: your environment, a .env file next to this file, and
+# ~/.brioly/credentials (KEY=VALUE lines, chmod 600).
+version: 1
+
+# Where documents are written.
+output: brioly-docs
+
+# Bring your own key. Only collected facts are sent to the model, never
+# source code or environment variable values. Use --no-llm to skip this.
+llm:
+  api_key: ${ANTHROPIC_API_KEY}
+  model: claude-opus-5-5
+
+docs:
+  language: English          # e.g. Korean, Japanese, German
+  jd_roles: []               # e.g. ["Backend Engineer", "Cloud Engineer"]; empty = suggest
+
+# Names, owners, merges and notes for the components brioly finds. Optional.
+# Create a starter file with: brioly components init
+components: components.yaml
+
+# Tags that count as structural. Changes to other tags never raise a change
+# event. This is the default list.
+labels:
+  allow: [env, environment, team, owner, service, app, project]
+
+sources:
+  # AWS uses the standard credential chain (profile, SSO, environment, OIDC).
+  # Use a read-only profile; brioly only calls Describe/List APIs.
+  aws:
+    profile: prod-readonly
+    regions: [ap-northeast-2]
+
+  # Local checkouts. Set name to override the repository name.
+  repos:
+    - path: ../api
+    - path: ../web

@@ -1,0 +1,117 @@
+# Keep brioly documents current from CI. Copy to .github/workflows/brioly.yml
+# and set `output: docs/brioly` in brioly.yaml. Verified end to end on a real
+# repository and AWS account on 2026-11-24.
+#
+# Each run scans and regenerates the documents. A pull request is opened (or
+# updated) only when `brioly diff` finds changes since the committed
+# facts.json. Its description is the list of change events; its diff is the
+# few lines of the documents that the change affects.
+#
+# Before use:
+# - Pin every action to a full commit SHA and brioly to a released version.
+#   This job holds write access to the repository and AWS credentials.
+# - Create an IAM role that trusts this repository's OIDC identity and allows
+#   only the actions in docs/examples/aws-readonly-policy.json. Restrict the
+#   trust to your default branch. Check the subject format GitHub uses for the
+#   repository first (`gh api repos/OWNER/REPO/actions/oidc/customization/sub`):
+#   with immutable subjects it is `repo:OWNER@ID/REPO@ID:ref:refs/heads/main`,
+#   not `repo:OWNER/REPO:...`, and a role that expects the other form fails
+#   with "Not authorized to perform sts:AssumeRoleWithWebIdentity".
+# - Allow workflows to open pull requests: repository Settings > Actions >
+#   General > "Allow GitHub Actions to create and approve pull requests".
+# - Add the ANTHROPIC_API_KEY repository secret (or run with --no-llm).
+# - Commit everything brioly writes, including facts.json and written.json:
+#   the next run compares against the first and revises from the second. To
+#   keep them out of the way in reviews, add to .gitattributes:
+#     docs/brioly/facts.json linguist-generated=true
+#     docs/brioly/written.json linguist-generated=true
+name: brioly docs
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write # keyless AWS access through OIDC
+
+concurrency:
+  group: brioly-docs
+  cancel-in-progress: false
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # pin to a commit SHA
+
+      - uses: aws-actions/configure-aws-credentials@v4 # pin to a commit SHA
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/brioly-readonly
+          aws-region: <REGION>
+
+      - uses: actions/setup-go@v5 # pin to a commit SHA
+        with:
+          go-version: stable
+      # Replace <VERSION> with a released version; do not use @latest here.
+      - run: go install github.com/brioly/brioly/cmd/brioly@<VERSION> # module path is provisional
+
+      # Answers of the model for prompts already asked. Until a documentation
+      # pull request is merged, every run sees the same change again; with
+      # this cache it does not pay for the same answer twice. brioly keeps
+      # the directory out of git with its own .gitignore.
+      - uses: actions/cache@v4 # pin to a commit SHA
+        with:
+          path: docs/brioly/.cache
+          key: brioly-llm-${{ github.run_id }}
+          restore-keys: brioly-llm-
+
+      # The last committed facts.json is the baseline; keep a copy before
+      # generate overwrites it.
+      - name: Keep the committed snapshot
+        run: |
+          set -eu
+          if [ -f docs/brioly/facts.json ]; then
+            cp docs/brioly/facts.json "$RUNNER_TEMP/brioly-prev.json"
+          fi
+
+      - name: Generate documents
+        # The API key is only visible to this step. Drop the env block and
+        # add --no-llm to skip the LLM-written documents.
+        run: brioly generate -c brioly.yaml
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # facts.json always differs between runs (it records scan times), so
+      # `brioly diff`, not the file contents, decides whether to open a pull
+      # request. The summary goes to a file, not to a step output: resource
+      # names come from the cloud account and must not be able to break out
+      # of a delimiter.
+      - id: changes
+        name: Compare with the committed snapshot
+        run: |
+          set -eu
+          if [ ! -f "$RUNNER_TEMP/brioly-prev.json" ]; then
+            echo "First snapshot." > "$RUNNER_TEMP/brioly-changes.md"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          brioly diff "$RUNNER_TEMP/brioly-prev.json" docs/brioly/facts.json > "$RUNNER_TEMP/brioly-changes.md"
+          cat "$RUNNER_TEMP/brioly-changes.md" >> "$GITHUB_STEP_SUMMARY"
+          if grep -qx "No changes." "$RUNNER_TEMP/brioly-changes.md"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6 # pin to a commit SHA
+        with:
+          branch: brioly/docs
+          title: "docs: update architecture documents"
+          commit-message: "docs: update architecture documents (brioly)"
+          body-path: ${{ runner.temp }}/brioly-changes.md
+          add-paths: |
+            docs/brioly
