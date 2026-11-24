@@ -125,6 +125,16 @@ func TestWriteIsDeterministic(t *testing.T) {
 		}
 		return out
 	}
+	// Files is the same output without a directory.
+	mem, err := Files(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, body := range read() {
+		if string(mem[rel]) != body {
+			t.Errorf("Files and Write disagree on %s", rel)
+		}
+	}
 	a, b := read(), read()
 	for rel := range a {
 		if a[rel] != b[rel] {

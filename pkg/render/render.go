@@ -24,8 +24,11 @@ const (
 	FactsFile        = "facts.json"
 )
 
-// Write renders the deterministic documents and the snapshot into dir.
-func Write(dir string, s *facts.Snapshot) error {
+// Files renders the deterministic documents of a snapshot in memory, keyed
+// by their path relative to the output directory. Callers that do not write
+// to a directory (brioly Cloud serves documents from stored snapshots) use
+// this; Write is Files plus the file system.
+func Files(s *facts.Snapshot) (map[string][]byte, error) {
 	g := newGraph(s)
 	diagram := Diagram(g)
 	files := map[string][]byte{
@@ -35,9 +38,18 @@ func Write(dir string, s *facts.Snapshot) error {
 	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	files[FactsFile] = append(raw, '\n')
+	return files, nil
+}
+
+// Write renders the deterministic documents of a snapshot into dir.
+func Write(dir string, s *facts.Snapshot) error {
+	files, err := Files(s)
+	if err != nil {
+		return err
+	}
 	for rel, body := range files {
 		p := filepath.Join(dir, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
