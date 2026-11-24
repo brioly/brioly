@@ -83,7 +83,7 @@
 
 ## 레포 구성
 
-- **`brioly`** (이 레포, Apache-2.0 예정): CLI, 수집기, 사실 스키마, 해석·렌더링 파이프라인. 명령은 `brioly generate`(로컬 문서 생성)이 있고, `brioly sync`(한 번 수집해 Cloud로 전송)와 `brioly agent`(상시 실행)는 계획입니다.
+- **`brioly`** (이 레포, Apache-2.0): CLI, 수집기, 사실 스키마, 해석·렌더링 파이프라인. 명령은 `brioly generate`(로컬 문서 생성)이 있고, `brioly sync`(한 번 수집해 Cloud로 전송)와 `brioly agent`(상시 실행)는 계획입니다.
 - **brioly Cloud**(별도 비공개 레포)는 이 레포를 Go 모듈로 가져다 씁니다. diff 엔진은 이 레포에 둡니다.
 
 커넥터는 지원하는 인증 방식(`role` / `oauth` / `api_key`)을 선언하고, 모두 같은 사실 스키마를 반환합니다.

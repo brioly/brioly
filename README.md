@@ -77,3 +77,7 @@ Documents are meant to be reviewed as pull requests, so a change in your system 
 go test ./...
 go build -o bin/brioly ./cmd/brioly
 ```
+
+## License
+
+[Apache License 2.0](LICENSE). The name "brioly" and its logos are not covered by the license.
