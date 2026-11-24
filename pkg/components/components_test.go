@@ -442,3 +442,89 @@ func TestEKSPlatformAndKubernetesLoadBalancer(t *testing.T) {
 		}
 	}
 }
+
+// With the cluster read, the running workload is the anchor: the manifest
+// that declares it joins its component, the load balancer link comes from
+// the cluster's own report, and the tag rule stays out of the way.
+func TestClusterWorkloadsAbsorbTheirManifests(t *testing.T) {
+	mk := func(id, kind, name, connector string, attrs map[string]any) facts.Fact {
+		f := facts.NewObserved(id, kind, name, facts.Source{Connector: connector}, facts.SourceRef{Type: facts.RefURL, Value: id}, time.Unix(0, 0))
+		for k, v := range attrs {
+			f.Attributes[k] = v
+		}
+		return f
+	}
+	e := func(typ, from, to string) facts.Edge {
+		return facts.NewEdge(typ, from, to, facts.Derivation{Type: facts.Observed}, nil)
+	}
+	const (
+		cluster, nlb                 = "aws:eks/prod", "aws:lb/k8s"
+		liveDep, liveSvc, liveIng    = "k8s:prod:default/deployment/web", "k8s:prod:default/service/web", "k8s:prod:default/ingress/shop"
+		liveJob, orphanIng           = "k8s:prod:default/cronjob/report", "k8s:prod:default/ingress/internal"
+		repo, manDep, manSvc, manJob = "gh:acme/web", "gh:acme/web:k8s:dep", "gh:acme/web:k8s:svc", "gh:acme/web:k8s:job"
+		manJob2, manOnly             = "gh:acme/web:k8s:job2", "gh:acme/web:k8s:only"
+	)
+	wl := func(kind string) map[string]any { return map[string]any{"namespace": "default", "workload_kind": kind} }
+	s := &facts.Snapshot{
+		Facts: []facts.Fact{
+			mk(cluster, "aws.eks.cluster", "prod", "aws", nil),
+			mk(nlb, "aws.elbv2.load_balancer", "default/web", "aws", map[string]any{"k8s_service": "default/web"}),
+			mk(liveDep, "k8s.workload", "web", "kubernetes", wl("Deployment")),
+			mk(liveSvc, "k8s.service", "web", "kubernetes", map[string]any{"namespace": "default"}),
+			mk(liveIng, "k8s.ingress", "shop", "kubernetes", map[string]any{"namespace": "default"}),
+			mk(orphanIng, "k8s.ingress", "internal", "kubernetes", map[string]any{"namespace": "default"}),
+			mk(liveJob, "k8s.workload", "report", "kubernetes", wl("CronJob")),
+			mk(repo, "code.repository", "web", "github", nil),
+			mk(manDep, "k8s.workload", "web", "github", wl("Deployment")),
+			mk(manSvc, "k8s.service", "web", "github", map[string]any{"namespace": "default"}),
+			mk(manJob, "k8s.workload", "report", "github", wl("CronJob")),
+			mk(manJob2, "k8s.workload", "report", "github", wl("CronJob")),
+			mk(manOnly, "k8s.workload", "planned", "github", wl("Deployment")),
+		},
+		Edges: []facts.Edge{
+			e(facts.EdgeRunsOn, liveDep, cluster), e(facts.EdgeRoutesTo, liveSvc, liveDep),
+			e(facts.EdgeRoutesTo, nlb, liveSvc), e(facts.EdgeRoutesTo, nlb, liveIng), e(facts.EdgeRoutesTo, liveIng, liveSvc),
+			e(facts.EdgeRoutesTo, manSvc, manDep),
+		},
+	}
+	got, warnings := build(t, s, nil)
+
+	if c := got[liveDep]; members(c) != strings.Join([]string{repo, manDep, manSvc, liveDep, liveSvc}, " ") {
+		t.Errorf("running workload component = %q, want its Service, its manifest, the manifest's Service and the repository", members(c))
+	}
+	if _, ok := got[manDep]; ok {
+		t.Error("a manifest of a running workload must not be a component of its own")
+	}
+	if _, ok := got[manOnly]; !ok {
+		t.Error("a manifest nothing runs for is still a component (declared, not seen running)")
+	}
+	if c := got[nlb]; !strings.Contains(members(c), liveIng) || strings.Contains(members(c), orphanIng) {
+		t.Errorf("load balancer component = %q, want the Ingress it serves", members(c))
+	}
+	if c := got[orphanIng]; c.Role != RoleNetworkEdge {
+		t.Errorf("an Ingress no load balancer serves should be an entry point, got %+v", c)
+	}
+	// Two manifests declare the CronJob: neither is linked, neither is an
+	// anchor, and the user is told.
+	if c := got[liveJob]; strings.Contains(members(c), manJob) {
+		t.Errorf("an ambiguous manifest was linked: %q", members(c))
+	}
+	if _, ok := got[manJob]; ok || len(warnings) != 1 || !strings.Contains(warnings[0], "default/cronjob/report") {
+		t.Errorf("warnings = %v", warnings)
+	}
+	inferredToManifest, defines := false, false
+	for _, ed := range s.Edges {
+		if ed.From == nlb && ed.To == manSvc {
+			inferredToManifest = true
+		}
+		if ed.Type == facts.EdgeDefines && ed.From == manDep && ed.To == liveDep && ed.Derivation.Type == facts.Inferred {
+			defines = true
+		}
+	}
+	if inferredToManifest {
+		t.Error("the tag rule linked the load balancer to a manifest although the cluster was read")
+	}
+	if !defines {
+		t.Error("missing the inferred defines edge from the manifest to the running workload")
+	}
+}

@@ -16,10 +16,23 @@ type graph struct {
 	byID map[string]facts.Fact
 	out  map[string]map[string][]string // from -> edge type -> to
 	in   map[string]map[string][]string // to -> edge type -> from
+	// inferred holds the edges that were derived, not observed.
+	inferred map[[3]string]bool
+}
+
+// liveConnector is the connector of facts read from a cluster's API server;
+// k8s.* facts of other connectors come from manifests in a repository.
+const liveConnector = "kubernetes"
+
+func live(f facts.Fact) bool { return f.Source.Connector == liveConnector }
+
+// isInferred reports whether the edge from -> to was derived by a rule.
+func (g *graph) isInferred(from, edgeType, to string) bool {
+	return g.inferred[[3]string{from, edgeType, to}]
 }
 
 func newGraph(s *facts.Snapshot) *graph {
-	g := &graph{snap: s, byID: map[string]facts.Fact{}, out: map[string]map[string][]string{}, in: map[string]map[string][]string{}}
+	g := &graph{snap: s, byID: map[string]facts.Fact{}, out: map[string]map[string][]string{}, in: map[string]map[string][]string{}, inferred: map[[3]string]bool{}}
 	for _, f := range s.Facts {
 		g.byID[f.ID] = f
 	}
@@ -29,6 +42,9 @@ func newGraph(s *facts.Snapshot) *graph {
 		}
 		if g.in[e.To] == nil {
 			g.in[e.To] = map[string][]string{}
+		}
+		if e.Derivation.Type == facts.Inferred {
+			g.inferred[[3]string{e.From, e.Type, e.To}] = true
 		}
 		g.out[e.From][e.Type] = append(g.out[e.From][e.Type], e.To)
 		g.in[e.To][e.Type] = append(g.in[e.To][e.Type], e.From)
@@ -136,22 +152,68 @@ func (g *graph) clusterOf(asgID string) (facts.Fact, bool) {
 	return facts.Fact{}, false
 }
 
-// manifestsBehind returns the Kubernetes workloads declared in a repository
-// that a load balancer is linked to through its Service tag. The link is
-// inferred.
+// manifestsBehind returns the Kubernetes Services a load balancer leads to,
+// directly or through an Ingress, and the workloads those select. They are
+// read from the cluster when it was scanned; otherwise they are manifests
+// in a repository, linked through the load balancer's tags.
 func (g *graph) manifestsBehind(lbID string) (services, workloads []facts.Fact) {
-	for _, svc := range g.targets(lbID, facts.EdgeRoutesTo) {
-		if svc.Kind != "k8s.service" {
-			continue
+	seenSvc, seenW := map[string]bool{}, map[string]bool{}
+	addService := func(svc facts.Fact) {
+		if svc.Kind != "k8s.service" || seenSvc[svc.ID] {
+			return
 		}
+		seenSvc[svc.ID] = true
 		services = append(services, svc)
 		for _, w := range g.targets(svc.ID, facts.EdgeRoutesTo) {
-			if w.Kind == "k8s.workload" {
+			if w.Kind == "k8s.workload" && !seenW[w.ID] {
+				seenW[w.ID] = true
 				workloads = append(workloads, w)
 			}
 		}
 	}
+	for _, t := range g.targets(lbID, facts.EdgeRoutesTo) {
+		addService(t)
+		if t.Kind == "k8s.ingress" {
+			for _, svc := range g.targets(t.ID, facts.EdgeRoutesTo) {
+				addService(svc)
+			}
+		}
+	}
 	return services, workloads
+}
+
+// observedPath reports whether a load balancer reaches a workload only by
+// observed links (a cluster's own report), not by inference from tags.
+func (g *graph) observedPath(lbID, workloadID string) bool {
+	via := func(from string, svc facts.Fact) bool {
+		return svc.Kind == "k8s.service" && live(svc) && !g.isInferred(from, facts.EdgeRoutesTo, svc.ID) &&
+			contains(g.out[svc.ID][facts.EdgeRoutesTo], workloadID)
+	}
+	for _, t := range g.targets(lbID, facts.EdgeRoutesTo) {
+		if g.isInferred(lbID, facts.EdgeRoutesTo, t.ID) {
+			continue
+		}
+		if via(lbID, t) {
+			return true
+		}
+		if t.Kind == "k8s.ingress" {
+			for _, svc := range g.targets(t.ID, facts.EdgeRoutesTo) {
+				if via(t.ID, svc) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func contains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // evidence renders a fact's source reference for a document. It prints only

@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"encoding/base64"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -8,6 +9,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 
+	"github.com/brioly/brioly/pkg/collect"
 	"github.com/brioly/brioly/pkg/facts"
 )
 
@@ -128,6 +130,13 @@ func (s *scan) collectEKS() {
 			f.Attributes["authentication_mode"] = string(c.AccessConfig.AuthenticationMode)
 		}
 		f.Attributes["platform_version"] = aws.ToString(c.PlatformVersion)
+		if ca := c.CertificateAuthority; ca != nil && aws.ToString(c.Endpoint) != "" {
+			if pem, e := base64.StdEncoding.DecodeString(aws.ToString(ca.Data)); e == nil {
+				s.res.Clusters = append(s.res.Clusters, collect.KubeCluster{
+					FactID: f.ID, Name: name, Scope: s.acct.ID, Region: s.region, Server: aws.ToString(c.Endpoint), CAData: pem,
+				})
+			}
+		}
 		f.Volatile = map[string]any{"status": string(c.Status)}
 		f.Labels = facts.Labels(c.Tags)
 		s.eksClusters[name] = f.ID

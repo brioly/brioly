@@ -34,6 +34,25 @@ sources:
     profile: prod-readonly
     regions: [ap-northeast-2]
 
+  # Optional: read what runs inside Kubernetes clusters (workloads, Services,
+  # Ingresses) from their API servers. Never Secrets, ConfigMaps or pods.
+  # The identity needs read access in the cluster, see
+  # docs/examples/kubernetes-readonly.yaml. Without this, what runs in a
+  # cluster is known only from manifests in the repositories below.
+  #
+  # Any cluster kubectl can reach (EKS, GKE, AKS, self-managed): run brioly
+  # with KUBECONFIG set, and the current context of that file is read with
+  # the credentials it names:
+  #
+  #   KUBECONFIG=~/.kube/config brioly generate
+  #
+  # Or configure it here. ~/.kube/config is never used on its own.
+  # kubernetes:
+  #   kubeconfig: ./kubeconfig         # instead of the KUBECONFIG variable
+  #   contexts: [prod, staging]        # default: the current context
+  #   eks: true                        # also every EKS cluster the AWS scan finds, with the AWS identity (no kubeconfig needed)
+  #   exclude_namespaces: [kube-system, kube-public, kube-node-lease]
+
   # Local checkouts. Set name to override the repository name.
   repos:
     - path: ../api

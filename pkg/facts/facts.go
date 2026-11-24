@@ -20,6 +20,8 @@ const (
 	RefARN  = "arn"
 	RefFile = "file"
 	RefURL  = "url"
+	// RefKubernetes points at an object in a cluster: cluster/namespace/Kind/name.
+	RefKubernetes = "kubernetes"
 )
 
 // Coverage statuses. Only CoverageComplete allows a missing fact to be treated

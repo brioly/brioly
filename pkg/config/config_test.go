@@ -118,3 +118,26 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		})
 	}
 }
+
+// KUBECONFIG in the environment is a source by itself; contexts need one.
+func TestKubeconfigFromEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "brioly.yaml")
+	writeFile(t, path, "version: 1\nsources:\n  kubernetes:\n    contexts: [prod]\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "needs a kubeconfig") {
+		t.Errorf("contexts without a kubeconfig: %v", err)
+	}
+	t.Setenv("KUBECONFIG", "/somewhere/config")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := cfg.Sources.Kubernetes; k == nil || k.Kubeconfig != "/somewhere/config" || k.EKS {
+		t.Errorf("kubernetes source = %+v", cfg.Sources.Kubernetes)
+	}
+	// A path in the file wins over the environment.
+	writeFile(t, path, "version: 1\nsources:\n  kubernetes:\n    kubeconfig: ./mine\n")
+	if cfg, err = Load(path); err != nil || cfg.Sources.Kubernetes.Kubeconfig != filepath.Join(dir, "mine") {
+		t.Errorf("kubeconfig = %+v, err = %v", cfg.Sources.Kubernetes, err)
+	}
+}

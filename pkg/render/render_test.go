@@ -313,3 +313,108 @@ func TestDiagramDrawsWorkloadsInsideTheirCluster(t *testing.T) {
 		t.Errorf("a cluster without a known workload should be a node the load balancer points at:\n%s", d)
 	}
 }
+
+// A cluster that was read lists its workloads, and the path from the load
+// balancer is drawn solid because the cluster itself reports it.
+func TestClusterWorkloadsAreRendered(t *testing.T) {
+	now := time.Unix(0, 0)
+	mk := func(id, kind, connector string, attrs map[string]any) facts.Fact {
+		f := facts.NewObserved(id, kind, id[strings.LastIndex(id, ":")+1:], facts.Source{Connector: connector, Scope: "1", Region: "r"},
+			facts.SourceRef{Type: facts.RefARN, Value: id}, now)
+		for k, v := range attrs {
+			f.Attributes[k] = v
+		}
+		return f
+	}
+	e := func(typ, from, to string, inferred bool) facts.Edge {
+		d := facts.Derivation{Type: facts.Observed}
+		if inferred {
+			d.Type = facts.Inferred
+		}
+		return facts.NewEdge(typ, from, to, d, nil)
+	}
+	build := func(read bool) (string, string) {
+		s := &facts.Snapshot{
+			Facts: []facts.Fact{
+				mk("aws:cluster", "aws.eks.cluster", "aws", map[string]any{"version": "1.37"}),
+				mk("aws:lb", "aws.elbv2.load_balancer", "aws", map[string]any{"type": "network", "scheme": "internet-facing"}),
+				mk("repo:dep", "k8s.workload", "github", map[string]any{"workload_kind": "Deployment", "namespace": "default"}),
+			},
+		}
+		if read {
+			s.Facts = append(s.Facts,
+				mk("k8s:web", "k8s.workload", "kubernetes", map[string]any{"workload_kind": "Deployment", "namespace": "default",
+					"image_repositories": []string{"acme/web"}, "ports": []int{8080}, "replicas": 2}),
+				mk("k8s:redis", "k8s.workload", "kubernetes", map[string]any{"workload_kind": "StatefulSet", "namespace": "default"}),
+				mk("k8s:websvc", "k8s.service", "kubernetes", map[string]any{"namespace": "default", "service_type": "LoadBalancer", "port_mappings": []string{"80->8080"}}),
+				mk("k8s:redissvc", "k8s.service", "kubernetes", map[string]any{"namespace": "default", "service_type": "ClusterIP"}),
+				mk("k8s:shop", "k8s.ingress", "kubernetes", map[string]any{"namespace": "default", "routes": []string{"shop.example.com/ -> web:80"}}),
+			)
+			s.Edges = append(s.Edges,
+				e(facts.EdgeRunsOn, "k8s:web", "aws:cluster", false), e(facts.EdgeRunsOn, "k8s:redis", "aws:cluster", false),
+				e(facts.EdgeRoutesTo, "aws:lb", "k8s:websvc", false), e(facts.EdgeRoutesTo, "k8s:websvc", "k8s:web", false),
+				e(facts.EdgeRoutesTo, "k8s:redissvc", "k8s:redis", false), e(facts.EdgeDependsOn, "k8s:web", "k8s:redissvc", false),
+				e(facts.EdgeDefines, "repo:dep", "k8s:web", true),
+			)
+		}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		g := newGraph(s)
+		d := Diagram(g)
+		return Architecture(g, d), d
+	}
+
+	doc, d := build(true)
+	for _, want := range []string{
+		"Workloads in **cluster**, read from its API server:",
+		"| web | Deployment | default | acme/web | 8080 | 2 | Service websvc (LoadBalancer, 80->8080) | `repo:dep` |",
+		"| redis | StatefulSet | default |",
+		"- Kubernetes Service `default/websvc` (port → container port: 80->8080) selects Deployment `web`",
+		"### shop (Kubernetes Ingress)", "  - `shop.example.com/ -> web:80`",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("architecture.md is missing %q\n---\n%s", want, doc)
+		}
+	}
+	if strings.Contains(doc, "was not read") || strings.Contains(doc, "Inferred: that Service") {
+		t.Errorf("a cluster that was read is described as inferred:\n%s", doc)
+	}
+	lb, web, redis := nodeID("aws:lb"), nodeID("k8s:web"), nodeID("k8s:redis")
+	for _, want := range []string{lb + " --> " + web, web + " -.-> " + redis, "subgraph " + nodeID("aws:cluster")} {
+		if !strings.Contains(d, want) {
+			t.Errorf("diagram is missing %q\n---\n%s", want, d)
+		}
+	}
+
+	doc, _ = build(false)
+	if !strings.Contains(doc, "The Kubernetes API of **cluster** was not read") {
+		t.Errorf("a cluster that was not read should say so:\n%s", doc)
+	}
+}
+
+// "Not enabled", "refused" and "nothing runs there" are three different
+// statements about a cluster without workloads.
+func TestClusterWithoutWorkloadsSaysWhy(t *testing.T) {
+	build := func(cov []facts.Coverage) string {
+		c := facts.NewObserved("aws:cluster", "aws.eks.cluster", "prod", facts.Source{Connector: "aws", Scope: "1", Region: "r"},
+			facts.SourceRef{Type: facts.RefARN, Value: "cluster"}, time.Unix(0, 0))
+		s := &facts.Snapshot{Facts: []facts.Fact{c}, Coverage: cov}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		return Architecture(newGraph(s), "")
+	}
+	k := func(status string) []facts.Coverage {
+		return []facts.Coverage{{Connector: "kubernetes", Scope: "prod", Region: "r", Kind: "k8s.workload", Status: status}}
+	}
+	for want, cov := range map[string][]facts.Coverage{
+		"was not read: what runs in it":                              nil,
+		"could not be read in this scan":                             k(facts.CoverageDenied),
+		"No workloads run in **prod** outside the system namespaces": k(facts.CoverageComplete),
+	} {
+		if doc := build(cov); !strings.Contains(doc, want) {
+			t.Errorf("missing %q in:\n%s", want, doc)
+		}
+	}
+}

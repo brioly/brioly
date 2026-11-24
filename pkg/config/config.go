@@ -69,8 +69,29 @@ type Docs struct {
 
 // Sources lists what to scan.
 type Sources struct {
-	AWS   *AWS   `yaml:"aws"`
-	Repos []Repo `yaml:"repos"`
+	AWS        *AWS        `yaml:"aws"`
+	Kubernetes *Kubernetes `yaml:"kubernetes"`
+	Repos      []Repo      `yaml:"repos"`
+}
+
+// Kubernetes selects the clusters whose API servers are read.
+type Kubernetes struct {
+	// EKS reads every EKS cluster the AWS scan finds, with the same AWS
+	// identity. The identity needs read access inside the cluster (see
+	// docs/examples/kubernetes-readonly.yaml).
+	EKS bool `yaml:"eks"`
+	// Kubeconfig is a kubeconfig file (or several, separated like
+	// $KUBECONFIG) whose contexts are read with the credentials it names:
+	// any cluster kubectl can reach, on any cloud or none. When it is empty
+	// the KUBECONFIG environment variable is used; ~/.kube/config is never
+	// picked up on its own.
+	Kubeconfig string `yaml:"kubeconfig"`
+	// Contexts are the kubeconfig contexts to read; empty means the
+	// current context.
+	Contexts []string `yaml:"contexts"`
+	// ExcludeNamespaces replaces the default list of skipped namespaces
+	// (kube-system, kube-public, kube-node-lease).
+	ExcludeNamespaces []string `yaml:"exclude_namespaces"`
 }
 
 // AWS selects the AWS account to scan through the standard credential chain.
@@ -152,6 +173,17 @@ func (c *Config) applyDefaults() {
 	if c.Docs.Language == "" {
 		c.Docs.Language = "English"
 	}
+	// Paths written in brioly.yaml are relative to it (a path from the
+	// KUBECONFIG environment variable is added later and left as it is).
+	if k := c.Sources.Kubernetes; k != nil && k.Kubeconfig != "" {
+		parts := filepath.SplitList(k.Kubeconfig)
+		for i, p := range parts {
+			if p != "" && !filepath.IsAbs(p) {
+				parts[i] = filepath.Join(c.Dir, p)
+			}
+		}
+		k.Kubeconfig = strings.Join(parts, string(filepath.ListSeparator))
+	}
 	for i := range c.Sources.Repos {
 		if !filepath.IsAbs(c.Sources.Repos[i].Path) {
 			c.Sources.Repos[i].Path = filepath.Join(c.Dir, c.Sources.Repos[i].Path)
@@ -172,11 +204,25 @@ func (c *Config) validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported brioly.yaml version %d", c.Version)
 	}
-	if c.Sources.AWS == nil && len(c.Sources.Repos) == 0 {
-		return errors.New("brioly.yaml: no sources configured (sources.aws or sources.repos)")
+	// KUBECONFIG in the environment turns the Kubernetes source on.
+	if env := os.Getenv("KUBECONFIG"); env != "" && (c.Sources.Kubernetes == nil || c.Sources.Kubernetes.Kubeconfig == "") {
+		if c.Sources.Kubernetes == nil {
+			c.Sources.Kubernetes = &Kubernetes{}
+		}
+		c.Sources.Kubernetes.Kubeconfig = env
+	}
+	k := c.Sources.Kubernetes
+	if k != nil && len(k.Contexts) > 0 && k.Kubeconfig == "" {
+		return errors.New("brioly.yaml: sources.kubernetes.contexts needs a kubeconfig: set sources.kubernetes.kubeconfig or the KUBECONFIG environment variable")
+	}
+	if c.Sources.AWS == nil && len(c.Sources.Repos) == 0 && (k == nil || k.Kubeconfig == "") {
+		return errors.New("brioly.yaml: no sources configured (sources.aws, sources.repos, or a kubeconfig for sources.kubernetes)")
 	}
 	if c.Sources.AWS != nil && len(c.Sources.AWS.Regions) == 0 {
 		return errors.New("brioly.yaml: sources.aws.regions must list at least one region")
+	}
+	if k := c.Sources.Kubernetes; k != nil && k.EKS && c.Sources.AWS == nil {
+		return errors.New("brioly.yaml: sources.kubernetes.eks needs sources.aws: clusters are found by the AWS scan")
 	}
 	for _, r := range c.Sources.Repos {
 		if r.Path == "" {
