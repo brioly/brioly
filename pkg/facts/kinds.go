@@ -128,6 +128,9 @@ var Kinds = map[string]Kind{
 	// repository's connector) and a cluster's API server (connector
 	// "kubernetes"). load_balancer_hostnames, schedule and
 	// container_env_keys are only known from a cluster.
+	// k8s.cluster is a cluster no cloud collector describes (read through a
+	// kubeconfig): an EKS cluster read the same way stays an aws.eks.cluster.
+	"k8s.cluster": {Structural: []string{"version"}, Detail: []string{"git_version", "server"}, Anchor: true},
 	"k8s.service": {Structural: []string{"namespace", "service_type", "ports", "port_mappings"}, Detail: []string{"load_balancer_hostnames"}},
 	"k8s.ingress": {
 		Structural: []string{"namespace", "ingress_class", "hosts", "routes", "tls"},

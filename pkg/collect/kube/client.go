@@ -31,10 +31,36 @@ type Client struct {
 	http   *http.Client
 }
 
+// Credentials authenticate a caller to an API server: a bearer token, a
+// client certificate, or both.
+type Credentials struct {
+	Token   string
+	CertPEM []byte
+	KeyPEM  []byte
+}
+
+// ClientOptions are the less common settings of a client.
+type ClientOptions struct {
+	// Insecure skips verification of the server certificate
+	// (insecure-skip-tls-verify in a kubeconfig).
+	Insecure bool
+}
+
 // NewClient returns a client for the API server at server, trusting the
 // given CA certificates (PEM). An empty caPEM uses the system roots.
-func NewClient(server string, caPEM []byte, token string) (*Client, error) {
+func NewClient(server string, caPEM []byte, creds Credentials, opts ...ClientOptions) (*Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	for _, o := range opts {
+		tlsConfig.InsecureSkipVerify = o.Insecure //nolint:gosec // the user's kubeconfig asks for it
+	}
+	if len(creds.CertPEM) > 0 {
+		pair, err := tls.X509KeyPair(creds.CertPEM, creds.KeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes: client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{pair}
+	}
+	token := creds.Token
 	if len(caPEM) > 0 {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
@@ -55,7 +81,9 @@ func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {

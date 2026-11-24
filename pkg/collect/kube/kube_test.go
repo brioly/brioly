@@ -31,6 +31,10 @@ func apiServer(t *testing.T, items map[string]string, status int) (*httptest.Ser
 			w.WriteHeader(status)
 			return
 		}
+		if r.URL.Path == "/version" {
+			w.Write([]byte(`{"major":"1","minor":"30+","gitVersion":"v1.30.1-gke.5"}`))
+			return
+		}
 		body, ok := items[r.URL.Path]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -56,7 +60,7 @@ func apiServer(t *testing.T, items map[string]string, status int) (*httptest.Ser
 
 func client(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
-	c, err := NewClient(srv.URL, nil, "test-token")
+	c, err := NewClient(srv.URL, nil, Credentials{Token: "test-token"})
 	if err != nil {
 		t.Fatal(err)
 	}

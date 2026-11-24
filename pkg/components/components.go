@@ -216,6 +216,9 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 	// Platforms: an EKS cluster, its node groups and their Auto Scaling
 	// groups.
 	for _, f := range s.Facts {
+		if f.Kind == "k8s.cluster" {
+			add(f, RolePlatform)
+		}
 		if f.Kind != "aws.eks.cluster" {
 			continue
 		}
@@ -282,7 +285,7 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 					facts.Derivation{Type: facts.Inferred, Evidence: []string{f.ID, m[0]}, Producer: ProducerK8sServiceTag}, nil))
 				// The tags also name the cluster, so the workloads that
 				// Service selects run there.
-				for _, cl := range ix.targets(f.ID, facts.EdgeExposes, "aws.eks.cluster") {
+				for _, cl := range ix.targets(f.ID, facts.EdgeExposes, "aws.eks.cluster") { // tags only exist on AWS
 					for _, w := range ix.targets(m[0], facts.EdgeRoutesTo, "k8s.workload") {
 						s.Edges = append(s.Edges, facts.NewEdge(facts.EdgeRunsOn, w, cl,
 							facts.Derivation{Type: facts.Inferred, Evidence: []string{f.ID, m[0], w}, Producer: ProducerK8sServiceTag}, nil))

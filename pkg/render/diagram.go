@@ -15,7 +15,7 @@ import (
 var diagramKinds = map[string]string{
 	"aws.elbv2.load_balancer": "lb", "aws.ecs.service": "svc", "aws.lambda.function": "fn",
 	"aws.autoscaling.group": "svc", "aws.ec2.instance": "svc", "aws.rds.cluster": "db",
-	"aws.rds.instance": "db", "aws.eks.cluster": "svc",
+	"aws.rds.instance": "db", "aws.eks.cluster": "svc", "k8s.cluster": "svc",
 }
 
 // Diagram renders a Mermaid flowchart grouped by VPC. It is derived from
@@ -67,7 +67,7 @@ func Diagram(g *graph) string {
 			continue
 		}
 		for _, c := range g.targets(n.ID, facts.EdgeRunsOn) {
-			if c.Kind == "aws.eks.cluster" && inCluster[n.ID] == "" {
+			if (c.Kind == "aws.eks.cluster" || c.Kind == "k8s.cluster") && inCluster[n.ID] == "" {
 				inCluster[n.ID] = c.ID
 				hosted[c.ID] = append(hosted[c.ID], n)
 			}
@@ -213,6 +213,8 @@ func shortKind(f facts.Fact) string {
 		return "EC2 ASG"
 	case "aws.eks.cluster":
 		return "EKS " + strAttr(f, "version")
+	case "k8s.cluster":
+		return strings.TrimSpace("Kubernetes " + strAttr(f, "version"))
 	case "k8s.workload":
 		return "Kubernetes " + strAttr(f, "workload_kind")
 	default:

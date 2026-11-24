@@ -10,6 +10,7 @@ package kube
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -177,6 +178,7 @@ func Collect(ctx context.Context, api API, cluster collect.KubeCluster, opts Opt
 	for _, ns := range exclude {
 		s.skip[ns] = true
 	}
+	s.collectCluster()
 	s.collectWorkloads()
 	s.collectServices()
 	s.collectIngresses()
@@ -187,10 +189,45 @@ func Collect(ctx context.Context, api API, cluster collect.KubeCluster, opts Opt
 // Unreachable records that a cluster could not be opened at all.
 func Unreachable(cluster collect.KubeCluster, err error) collect.Result {
 	s := &scan{src: facts.Source{Connector: Connector, Scope: cluster.Name, Region: cluster.Region}}
-	for _, kind := range []string{"k8s.workload", "k8s.service", "k8s.ingress"} {
+	kinds := []string{"k8s.workload", "k8s.service", "k8s.ingress"}
+	if cluster.FactID == "" {
+		kinds = append([]string{"k8s.cluster"}, kinds...)
+	}
+	for _, kind := range kinds {
 		s.cover(kind, err, false)
 	}
 	return s.res
+}
+
+// ClusterID is the ID of the k8s.cluster fact for an API server no other
+// collector describes.
+func ClusterID(server string) string { return "k8s:cluster:" + ServerHost(server) }
+
+// collectCluster makes the cluster's own fact when no other collector did
+// (a cluster outside the scanned cloud account, or outside any cloud).
+func (s *scan) collectCluster() {
+	if s.cluster.FactID != "" {
+		return
+	}
+	s.cluster.FactID = ClusterID(s.cluster.Server)
+	ref := facts.SourceRef{Type: facts.RefKubernetes, Value: s.cluster.Name}
+	f := facts.NewObserved(s.cluster.FactID, "k8s.cluster", s.cluster.Name, s.src, ref, s.opts.Now)
+	f.Attributes["server"] = ServerHost(s.cluster.Server)
+	raw, err := s.api.Get(s.ctx, "/version")
+	if err == nil {
+		var v struct {
+			Major      string `json:"major"`
+			Minor      string `json:"minor"`
+			GitVersion string `json:"gitVersion"`
+		}
+		if json.Unmarshal(raw, &v) == nil && v.Major != "" {
+			// Managed clusters report minors such as "30+".
+			f.Attributes["version"] = v.Major + "." + strings.TrimRight(v.Minor, "+")
+			f.Attributes["git_version"] = v.GitVersion
+		}
+	}
+	s.res.Facts = append(s.res.Facts, f)
+	s.cover("k8s.cluster", err, false)
 }
 
 func (s *scan) id(ns, kind, name string) string {

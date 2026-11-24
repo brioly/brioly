@@ -211,10 +211,38 @@ func scan(ctx context.Context, cfg *config.Config, stderr io.Writer) (*facts.Sna
 		}
 		res.Merge(r)
 	}
-	if k := cfg.Sources.Kubernetes; k != nil && k.EKS {
-		for _, cluster := range res.Clusters {
-			fmt.Fprintf(stderr, "scanning Kubernetes cluster %s\n", cluster.Name)
-			res.Merge(scanCluster(ctx, cluster, kube.Options{Endpoints: res.Endpoints, ExcludeNamespaces: k.ExcludeNamespaces}))
+	if k := cfg.Sources.Kubernetes; k != nil {
+		opts := kube.Options{Endpoints: res.Endpoints, ExcludeNamespaces: k.ExcludeNamespaces}
+		found := map[string]collect.KubeCluster{} // API server host -> cluster the cloud scan found
+		for _, c := range res.Clusters {
+			found[kube.ServerHost(c.Server)] = c
+		}
+		read := map[string]bool{}
+		if k.Kubeconfig != "" {
+			targets, err := kube.LoadKubeconfig(k.Kubeconfig, k.Contexts)
+			if err != nil {
+				return nil, err
+			}
+			for _, t := range targets {
+				host := kube.ServerHost(t.Cluster.Server)
+				// The same API server the cloud scan found: one cluster,
+				// described by the cloud's fact.
+				if c, ok := found[host]; ok {
+					t.Cluster.FactID, t.Cluster.Name, t.Cluster.Scope, t.Cluster.Region = c.FactID, c.Name, c.Scope, c.Region
+				}
+				read[host] = true
+				fmt.Fprintf(stderr, "scanning Kubernetes cluster %s (kubeconfig context %s)\n", t.Cluster.Name, t.Context)
+				res.Merge(scanTarget(ctx, t, opts))
+			}
+		}
+		if k.EKS {
+			for _, cluster := range res.Clusters {
+				if read[kube.ServerHost(cluster.Server)] {
+					continue
+				}
+				fmt.Fprintf(stderr, "scanning Kubernetes cluster %s\n", cluster.Name)
+				res.Merge(scanCluster(ctx, cluster, opts))
+			}
 		}
 	}
 	return &facts.Snapshot{Facts: res.Facts, Edges: res.Edges, Coverage: res.Coverage}, nil
@@ -452,9 +480,23 @@ func scanCluster(ctx context.Context, cluster collect.KubeCluster, opts kube.Opt
 	if err != nil {
 		return kube.Unreachable(cluster, err)
 	}
-	client, err := kube.NewClient(cluster.Server, cluster.CAData, token)
+	client, err := kube.NewClient(cluster.Server, cluster.CAData, kube.Credentials{Token: token})
 	if err != nil {
 		return kube.Unreachable(cluster, err)
 	}
 	return kube.Collect(ctx, client, cluster, opts)
+}
+
+// scanTarget reads a cluster named by a kubeconfig context with the
+// credentials that context names.
+func scanTarget(ctx context.Context, t kube.Target, opts kube.Options) collect.Result {
+	creds, err := t.Credentials(ctx)
+	if err != nil {
+		return kube.Unreachable(t.Cluster, err)
+	}
+	client, err := kube.NewClient(t.Cluster.Server, t.Cluster.CAData, creds, kube.ClientOptions{Insecure: t.Insecure})
+	if err != nil {
+		return kube.Unreachable(t.Cluster, err)
+	}
+	return kube.Collect(ctx, client, t.Cluster, opts)
 }

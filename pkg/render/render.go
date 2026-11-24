@@ -318,14 +318,14 @@ func clusterRead(g *graph, c facts.Fact) bool {
 
 func writeCompute(b *strings.Builder, g *graph) {
 	services, fns := g.kind("aws.ecs.service"), g.kind("aws.lambda.function")
-	instances, clusters := g.kind("aws.ec2.instance"), g.kind("aws.eks.cluster")
+	instances, clusters, kclusters := g.kind("aws.ec2.instance"), g.kind("aws.eks.cluster"), g.kind("k8s.cluster")
 	var asgs []facts.Fact
 	for _, a := range g.kind("aws.autoscaling.group") {
 		if _, ok := g.clusterOf(a.ID); !ok {
 			asgs = append(asgs, a) // node groups are listed with their cluster
 		}
 	}
-	if len(services)+len(fns)+len(asgs)+len(instances)+len(clusters) == 0 {
+	if len(services)+len(fns)+len(asgs)+len(instances)+len(clusters)+len(kclusters) == 0 {
 		return
 	}
 	b.WriteString("## Compute\n\n")
@@ -350,6 +350,18 @@ func writeCompute(b *strings.Builder, g *graph) {
 		}
 		b.WriteString("\n")
 		writeClusterWorkloads(b, g, clusters)
+	}
+	if len(kclusters) > 0 {
+		b.WriteString("### Kubernetes clusters\n\n")
+		for _, c := range kclusters {
+			version := "version not read"
+			if v := strAttr(c, "version"); v != "" {
+				version = "Kubernetes " + v
+			}
+			fmt.Fprintf(b, "- Cluster **%s**: %s, API server `%s` — %s\n", displayName(c), version, strAttr(c, "server"), evidence(c))
+		}
+		b.WriteString("\n")
+		writeClusterWorkloads(b, g, kclusters)
 	}
 	if len(services) > 0 {
 		b.WriteString("### ECS services\n\n| Service | Cluster | Launch | Containers | Source |\n|---|---|---|---|---|\n")
