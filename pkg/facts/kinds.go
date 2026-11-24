@@ -8,7 +8,7 @@ import (
 // RegistryVersion changes whenever the classification or a normalization
 // rule below changes. It is part of a snapshot's baseline key: snapshots
 // with different keys are not diffed against each other.
-const RegistryVersion = 4
+const RegistryVersion = 5
 
 // Kind declares, for one fact kind, which attributes exist and what a change
 // to each of them means. See docs/design/fact-schema-v1.md.
@@ -124,10 +124,19 @@ var Kinds = map[string]Kind{
 	},
 	"iac.terraform.resource": {Structural: []string{"resource_type", "provider", "module_dir"}},
 	"iac.terraform.module":   {Structural: []string{"module_dir", "source"}},
-	"k8s.service":            {Structural: []string{"namespace", "service_type", "ports", "port_mappings"}},
+	// The k8s.* kinds come from two places: manifests in a repository (the
+	// repository's connector) and a cluster's API server (connector
+	// "kubernetes"). load_balancer_hostnames, schedule and
+	// container_env_keys are only known from a cluster.
+	"k8s.service": {Structural: []string{"namespace", "service_type", "ports", "port_mappings"}, Detail: []string{"load_balancer_hostnames"}},
+	"k8s.ingress": {
+		Structural: []string{"namespace", "ingress_class", "hosts", "routes", "tls"},
+		Detail:     []string{"load_balancer_hostnames"},
+		Anchor:     true, // only when no load balancer fact serves it
+	},
 	"k8s.workload": {
-		Structural: []string{"workload_kind", "namespace", "image_repositories", "ports"},
-		Detail:     []string{"replicas"},
+		Structural: []string{"workload_kind", "namespace", "image_repositories", "ports", "schedule"},
+		Detail:     []string{"replicas", "container_env_keys"},
 		Volatile:   []string{"image_refs"},
 		Anchor:     true,
 	},

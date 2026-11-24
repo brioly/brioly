@@ -69,8 +69,20 @@ type Docs struct {
 
 // Sources lists what to scan.
 type Sources struct {
-	AWS   *AWS   `yaml:"aws"`
-	Repos []Repo `yaml:"repos"`
+	AWS        *AWS        `yaml:"aws"`
+	Kubernetes *Kubernetes `yaml:"kubernetes"`
+	Repos      []Repo      `yaml:"repos"`
+}
+
+// Kubernetes selects the clusters whose API servers are read.
+type Kubernetes struct {
+	// EKS reads every EKS cluster the AWS scan finds, with the same AWS
+	// identity. The identity needs read access inside the cluster (see
+	// docs/examples/kubernetes-readonly.yaml).
+	EKS bool `yaml:"eks"`
+	// ExcludeNamespaces replaces the default list of skipped namespaces
+	// (kube-system, kube-public, kube-node-lease).
+	ExcludeNamespaces []string `yaml:"exclude_namespaces"`
 }
 
 // AWS selects the AWS account to scan through the standard credential chain.
@@ -177,6 +189,9 @@ func (c *Config) validate() error {
 	}
 	if c.Sources.AWS != nil && len(c.Sources.AWS.Regions) == 0 {
 		return errors.New("brioly.yaml: sources.aws.regions must list at least one region")
+	}
+	if k := c.Sources.Kubernetes; k != nil && k.EKS && c.Sources.AWS == nil {
+		return errors.New("brioly.yaml: sources.kubernetes.eks needs sources.aws: clusters are found by the AWS scan")
 	}
 	for _, r := range c.Sources.Repos {
 		if r.Path == "" {

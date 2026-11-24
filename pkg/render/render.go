@@ -122,8 +122,24 @@ func Architecture(g *graph, diagram string) string {
 		}
 	}
 
-	if lbs := g.kind("aws.elbv2.load_balancer"); len(lbs) > 0 {
+	// Ingresses no load balancer fact serves are entry points of their own.
+	var ingresses []facts.Fact
+	for _, in := range g.kind("k8s.ingress") {
+		served := false
+		for _, src := range g.sources(in.ID, facts.EdgeRoutesTo) {
+			served = served || src.Kind == "aws.elbv2.load_balancer"
+		}
+		if !served {
+			ingresses = append(ingresses, in)
+		}
+	}
+	if lbs := g.kind("aws.elbv2.load_balancer"); len(lbs)+len(ingresses) > 0 {
 		b.WriteString("## Entry points\n\n")
+		for _, in := range ingresses {
+			fmt.Fprintf(&b, "### %s (Kubernetes Ingress)\n\n", displayName(in))
+			writeIngress(&b, g, in, "- ")
+			b.WriteString("- No load balancer in the scanned account reports this Ingress: it is served inside the cluster or from outside the scan.\n\n")
+		}
 		for _, lb := range lbs {
 			fmt.Fprintf(&b, "### %s (%s, %s)\n\n- Source: %s\n", displayName(lb), strAttr(lb, "type"), strAttr(lb, "scheme"), evidence(lb))
 			writeKubernetesOwner(&b, g, lb)
@@ -194,18 +210,110 @@ func writeKubernetesOwner(b *strings.Builder, g *graph, lb facts.Fact) {
 	if v := strAttr(lb, "k8s_ingress"); v != "" {
 		fmt.Fprintf(b, "- Created by Kubernetes for Ingress `%s`%s (AWS name: `%s`)\n", v, in, strAttr(lb, "lb_name"))
 	}
-	services, workloads := g.manifestsBehind(lb.ID)
+	for _, in := range g.targets(lb.ID, facts.EdgeRoutesTo) {
+		if in.Kind == "k8s.ingress" {
+			writeIngress(b, g, in, "- Serves ")
+		}
+	}
+	services, _ := g.manifestsBehind(lb.ID)
 	for _, svc := range services {
 		var names []string
-		for _, w := range workloads {
-			names = append(names, fmt.Sprintf("%s `%s` (%s)", strAttr(w, "workload_kind"), displayName(w), evidence(w)))
+		for _, w := range g.targets(svc.ID, facts.EdgeRoutesTo) {
+			if w.Kind == "k8s.workload" {
+				names = append(names, fmt.Sprintf("%s `%s` (%s)", strAttr(w, "workload_kind"), displayName(w), evidence(w)))
+			}
 		}
 		ports := ""
 		if pm := strings.Join(listAttr(svc, "port_mappings"), ", "); pm != "" {
 			ports = " (port → container port: " + pm + ")"
 		}
+		if live(svc) {
+			// Read from the cluster: the Service reports this load balancer
+			// and its selector was matched against the running workloads.
+			fmt.Fprintf(b, "- Kubernetes Service `%s/%s`%s selects %s — %s\n", strAttr(svc, "namespace"), displayName(svc), ports, orNone(names), evidence(svc))
+			continue
+		}
 		fmt.Fprintf(b, "- Inferred: that Service is declared in %s%s and selects %s\n", evidence(svc), ports, orNone(names))
 	}
+}
+
+// writeIngress describes an Ingress read from a cluster.
+func writeIngress(b *strings.Builder, g *graph, in facts.Fact, prefix string) {
+	class := ""
+	if c := strAttr(in, "ingress_class"); c != "" {
+		class = ", class `" + c + "`"
+	}
+	tls := ""
+	if boolAttr(in, "tls") {
+		tls = ", TLS"
+	}
+	fmt.Fprintf(b, "%sKubernetes Ingress `%s/%s`%s%s — %s\n", prefix, strAttr(in, "namespace"), displayName(in), class, tls, evidence(in))
+	for _, r := range listAttr(in, "routes") {
+		fmt.Fprintf(b, "  - `%s`\n", r)
+	}
+}
+
+// writeClusterWorkloads lists what runs in each cluster, as read from its
+// API server, or says that the cluster was not read.
+func writeClusterWorkloads(b *strings.Builder, g *graph, clusters []facts.Fact) {
+	for _, c := range clusters {
+		var ws []facts.Fact
+		for _, w := range g.sources(c.ID, facts.EdgeRunsOn) {
+			if w.Kind == "k8s.workload" && live(w) {
+				ws = append(ws, w)
+			}
+		}
+		if len(ws) == 0 {
+			tried := false
+			for _, cov := range g.snap.Coverage {
+				tried = tried || cov.Connector == liveConnector && cov.Kind == "k8s.workload" && cov.Scope == c.Name && cov.Status != facts.CoverageComplete
+			}
+			switch {
+			case tried:
+				fmt.Fprintf(b, "The Kubernetes API of **%s** could not be read in this scan (see \"Incomplete scan\" at the top): what runs in it is known only from manifests in the scanned repositories.\n\n", displayName(c))
+			case clusterRead(g, c):
+				fmt.Fprintf(b, "No workloads run in **%s** outside the system namespaces.\n\n", displayName(c))
+			default:
+				fmt.Fprintf(b, "The Kubernetes API of **%s** was not read: what runs in it is known only from manifests in the scanned repositories. Enable `sources.kubernetes` to read it.\n\n", displayName(c))
+			}
+			continue
+		}
+		sort.SliceStable(ws, func(i, j int) bool {
+			a, c := strAttr(ws[i], "namespace")+"/"+ws[i].Name, strAttr(ws[j], "namespace")+"/"+ws[j].Name
+			return a < c
+		})
+		fmt.Fprintf(b, "Workloads in **%s**, read from its API server:\n\n| Workload | Kind | Namespace | Images | Ports | Replicas | Reached through | Declared in |\n|---|---|---|---|---|---|---|---|\n", displayName(c))
+		for _, w := range ws {
+			var via, decl []string
+			for _, svc := range g.sources(w.ID, facts.EdgeRoutesTo) {
+				if svc.Kind == "k8s.service" && live(svc) {
+					via = append(via, fmt.Sprintf("Service %s (%s, %s)", displayName(svc), strAttr(svc, "service_type"), strings.Join(listAttr(svc, "port_mappings"), ", ")))
+				}
+			}
+			for _, m := range g.sources(w.ID, facts.EdgeDefines) {
+				decl = append(decl, evidence(m))
+			}
+			kind := strAttr(w, "workload_kind")
+			if s := strAttr(w, "schedule"); s != "" {
+				kind += " `" + s + "`"
+			}
+			fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n", mdEscape(displayName(w)), mdEscape(kind), strAttr(w, "namespace"),
+				mdEscape(strings.Join(listAttr(w, "image_repositories"), ", ")), strings.Trim(strings.Join(strings.Fields(strAttr(w, "ports")), ", "), "[]"),
+				strAttr(w, "replicas"), mdEscape(strings.Join(via, "; ")), strings.Join(decl, ", "))
+		}
+		b.WriteString("\nSystem namespaces (`kube-system`, ...) are left out. \"Declared in\" is inferred from the kind, namespace and name of a manifest.\n\n")
+	}
+}
+
+// clusterRead reports whether the scan read this cluster's API server in
+// full.
+func clusterRead(g *graph, c facts.Fact) bool {
+	for _, cov := range g.snap.Coverage {
+		if cov.Connector == liveConnector && cov.Kind == "k8s.workload" && cov.Scope == c.Name {
+			return cov.Status == facts.CoverageComplete
+		}
+	}
+	return false
 }
 
 func writeCompute(b *strings.Builder, g *graph) {
@@ -240,7 +348,8 @@ func writeCompute(b *strings.Builder, g *graph) {
 					strings.Join(listAttr(ng, "instance_types"), "/"), strAttr(ng, "capacity_type"), strAttr(ng, "ami_type"), evidence(ng))
 			}
 		}
-		b.WriteString("- brioly does not read the Kubernetes API: what runs in a cluster is known only from manifests in the scanned repositories.\n\n")
+		b.WriteString("\n")
+		writeClusterWorkloads(b, g, clusters)
 	}
 	if len(services) > 0 {
 		b.WriteString("### ECS services\n\n| Service | Cluster | Launch | Containers | Source |\n|---|---|---|---|---|\n")

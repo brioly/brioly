@@ -24,6 +24,7 @@ import (
 	"github.com/brioly/brioly/pkg/collect"
 	awscollect "github.com/brioly/brioly/pkg/collect/aws"
 	"github.com/brioly/brioly/pkg/collect/code"
+	"github.com/brioly/brioly/pkg/collect/kube"
 	"github.com/brioly/brioly/pkg/components"
 	"github.com/brioly/brioly/pkg/config"
 	"github.com/brioly/brioly/pkg/diff"
@@ -209,6 +210,12 @@ func scan(ctx context.Context, cfg *config.Config, stderr io.Writer) (*facts.Sna
 			return nil, err
 		}
 		res.Merge(r)
+	}
+	if k := cfg.Sources.Kubernetes; k != nil && k.EKS {
+		for _, cluster := range res.Clusters {
+			fmt.Fprintf(stderr, "scanning Kubernetes cluster %s\n", cluster.Name)
+			res.Merge(scanCluster(ctx, cluster, kube.Options{Endpoints: res.Endpoints, ExcludeNamespaces: k.ExcludeNamespaces}))
+		}
 	}
 	return &facts.Snapshot{Facts: res.Facts, Edges: res.Edges, Coverage: res.Coverage}, nil
 }
@@ -436,4 +443,18 @@ func saveWritten(path string, st *enrich.State) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
+}
+
+// scanCluster opens one cluster's API server and reads it. A cluster that
+// cannot be opened is recorded as coverage, not as a failure of the scan.
+func scanCluster(ctx context.Context, cluster collect.KubeCluster, opts kube.Options) collect.Result {
+	token, err := cluster.Token(ctx)
+	if err != nil {
+		return kube.Unreachable(cluster, err)
+	}
+	client, err := kube.NewClient(cluster.Server, cluster.CAData, token)
+	if err != nil {
+		return kube.Unreachable(cluster, err)
+	}
+	return kube.Collect(ctx, client, cluster, opts)
 }

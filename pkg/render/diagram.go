@@ -39,9 +39,15 @@ func Diagram(g *graph) string {
 	if len(nodes) == 0 {
 		return ""
 	}
-	// Workloads declared in a repository are drawn only when a load
-	// balancer leads to them.
+	// Kubernetes workloads: every one read from a cluster; one that is only
+	// declared in a repository is drawn when a load balancer leads to it.
 	manifest := map[string]bool{}
+	for _, w := range g.kind("k8s.workload") {
+		if live(w) {
+			manifest[w.ID] = true
+			nodes = append(nodes, w)
+		}
+	}
 	for _, lb := range g.kind("aws.elbv2.load_balancer") {
 		_, ws := g.manifestsBehind(lb.ID)
 		for _, w := range ws {
@@ -127,11 +133,16 @@ func Diagram(g *graph) string {
 		if strAttr(lb, "scheme") == "internet-facing" {
 			links = append(links, fmt.Sprintf("  internet --> %s", nodeID(lb.ID)))
 		}
-		// Dotted: inferred from the Service tag and a manifest in a repository.
+		// Solid when the cluster itself reports the path; dotted when it is
+		// inferred from the Service tag and a manifest in a repository.
 		_, ws := g.manifestsBehind(lb.ID)
 		through := map[string]bool{} // clusters this load balancer's workloads are drawn in
 		for _, w := range ws {
-			links = append(links, fmt.Sprintf("  %s -.-> %s", nodeID(lb.ID), nodeID(w.ID)))
+			arrow := "-.->"
+			if g.observedPath(lb.ID, w.ID) {
+				arrow = "-->"
+			}
+			links = append(links, fmt.Sprintf("  %s %s %s", nodeID(lb.ID), arrow, nodeID(w.ID)))
 			through[inCluster[w.ID]] = true
 		}
 		for _, w := range g.servicesBehind(lb.ID) {
@@ -149,8 +160,19 @@ func Diagram(g *graph) string {
 		drawn[n.ID] = true
 	}
 	for _, e := range g.snap.Edges {
-		if e.Type == facts.EdgeDependsOn && drawn[e.From] && drawn[e.To] {
-			links = append(links, fmt.Sprintf("  %s -.-> %s", nodeID(e.From), nodeID(e.To)))
+		if e.Type != facts.EdgeDependsOn || !drawn[e.From] {
+			continue
+		}
+		// A dependency on a Kubernetes Service is drawn to the workloads
+		// behind it.
+		tos := []string{e.To}
+		if g.byID[e.To].Kind == "k8s.service" {
+			tos = g.out[e.To][facts.EdgeRoutesTo]
+		}
+		for _, to := range tos {
+			if drawn[to] && to != e.From {
+				links = append(links, fmt.Sprintf("  %s -.-> %s", nodeID(e.From), nodeID(to)))
+			}
 		}
 	}
 	sort.Strings(links)

@@ -11,7 +11,7 @@ import (
 // system is made of.
 var significantKinds = map[string]bool{
 	"aws.ecs.service": true, "aws.lambda.function": true, "aws.autoscaling.group": true, "aws.ec2.instance": true,
-	"aws.rds.cluster": true, "aws.rds.instance": true, "aws.elbv2.load_balancer": true, "aws.ec2.vpc": true, "k8s.workload": true,
+	"aws.rds.cluster": true, "aws.rds.instance": true, "aws.elbv2.load_balancer": true, "aws.ec2.vpc": true, "k8s.workload": true, "k8s.ingress": true,
 }
 
 func isDevDependency(f facts.Fact) bool {

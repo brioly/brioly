@@ -36,6 +36,19 @@ const ProducerNameMatch = "rule:name-match"
 // It is inferred: the manifest in the repository may not be what is deployed.
 const ProducerK8sServiceTag = "rule:k8s-service-tag"
 
+// ProducerK8sManifestMatch marks defines edges from a workload declared in
+// a repository to the workload of the same kind, namespace and name that
+// runs in a cluster.
+const ProducerK8sManifestMatch = "rule:k8s-manifest-match"
+
+// liveConnector is the connector of facts read from a cluster's API server
+// (kube.Connector); k8s.* facts of other connectors come from manifests.
+const liveConnector = "kubernetes"
+
+func workloadKey(f facts.Fact) string {
+	return fmt.Sprint(f.Attributes["namespace"]) + "/" + strings.ToLower(fmt.Sprint(f.Attributes["workload_kind"])) + "/" + f.Name
+}
+
 var workloadKinds = map[string]bool{
 	"aws.ecs.service": true, "aws.lambda.function": true, "aws.autoscaling.group": true,
 	"aws.ec2.instance": true, "k8s.workload": true,
@@ -104,10 +117,53 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 		return c
 	}
 
+	// A workload declared in a repository and the workload that runs in a
+	// cluster under the same kind, namespace and name are one thing: the
+	// running one is the anchor and the manifest joins its component. The
+	// link is inferred, and made only when exactly one manifest declares it
+	// (overlays repeat the same names per environment).
+	running := map[string][]string{}  // key -> live workload fact IDs
+	declared := map[string][]string{} // key -> manifest workload fact IDs
+	for _, f := range s.Facts {
+		if f.Kind != "k8s.workload" {
+			continue
+		}
+		if f.Source.Connector == liveConnector {
+			running[workloadKey(f)] = append(running[workloadKey(f)], f.ID)
+		} else {
+			declared[workloadKey(f)] = append(declared[workloadKey(f)], f.ID)
+		}
+	}
+	manifestOf := map[string][]string{} // live workload fact ID -> manifest fact IDs
+	absorbed := map[string]bool{}       // manifest workloads that are not anchors
+	keys := make([]string, 0, len(declared))
+	for key := range declared {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		live, ms := running[key], declared[key]
+		if len(live) == 0 {
+			continue
+		}
+		for _, m := range ms {
+			absorbed[m] = true
+		}
+		if len(ms) > 1 {
+			warnings = append(warnings, fmt.Sprintf("workload %s runs in a cluster and %d manifests declare it; brioly cannot tell which one is deployed", key, len(ms)))
+			continue
+		}
+		for _, l := range live {
+			manifestOf[l] = append(manifestOf[l], ms[0])
+			s.Edges = append(s.Edges, facts.NewEdge(facts.EdgeDefines, ms[0], l,
+				facts.Derivation{Type: facts.Inferred, Evidence: []string{ms[0], l}, Producer: ProducerK8sManifestMatch}, nil))
+		}
+	}
+
 	// Workloads: the anchor, its task definition, the target groups that
 	// route to it, and the listener rules that only route to those.
 	for _, f := range s.Facts {
-		if !workloadKinds[f.Kind] {
+		if !workloadKinds[f.Kind] || absorbed[f.ID] {
 			continue
 		}
 		// The Auto Scaling group of a node group is part of its cluster:
@@ -118,6 +174,10 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 		c := add(f, RoleWorkload)
 		c.Members = append(c.Members, ix.targets(f.ID, facts.EdgeUses, "aws.ecs.task_definition")...)
 		c.Members = append(c.Members, ix.sources(f.ID, facts.EdgeRoutesTo, "k8s.service")...)
+		for _, m := range manifestOf[f.ID] {
+			c.Members = append(c.Members, m)
+			c.Members = append(c.Members, ix.sources(m, facts.EdgeRoutesTo, "k8s.service")...)
+		}
 		tgs := ix.sources(f.ID, facts.EdgeRoutesTo, "aws.elbv2.target_group")
 		c.Members = append(c.Members, tgs...)
 		own := map[string]bool{}
@@ -169,9 +229,10 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 	// Entry points: a load balancer, its listeners, the rules no workload
 	// owns (redirects, fixed responses, rules spanning workloads) and the
 	// target groups no workload owns (those that point at cluster nodes).
-	services := map[string][]string{} // "namespace/name" -> k8s.service fact IDs
+	servedIngress := map[string]bool{} // Ingresses that belong to a load balancer
+	services := map[string][]string{}  // "namespace/name" -> k8s.service fact IDs declared in manifests
 	for _, f := range s.Facts {
-		if f.Kind == "k8s.service" {
+		if f.Kind == "k8s.service" && f.Source.Connector != liveConnector {
 			key := fmt.Sprint(f.Attributes["namespace"]) + "/" + f.Name
 			services[key] = append(services[key], f.ID)
 		}
@@ -198,9 +259,22 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 				}
 			}
 		}
+		// The Ingresses a cluster reports this load balancer for.
+		readFromCluster := false
+		for _, t := range ix.out[f.ID][facts.EdgeRoutesTo] {
+			switch o := ix.byID[t]; {
+			case o.Kind == "k8s.ingress":
+				c.Members = append(c.Members, t)
+				servedIngress[t] = true
+				readFromCluster = true
+			case o.Kind == "k8s.service" && o.Source.Connector == liveConnector:
+				readFromCluster = true
+			}
+		}
 		// A load balancer made by Kubernetes is tagged with its Service.
-		// When exactly one manifest declares that Service, link them.
-		if key, _ := f.Attributes["k8s_service"].(string); key != "" {
+		// When the cluster was not read and exactly one manifest declares
+		// that Service, link them by inference.
+		if key, _ := f.Attributes["k8s_service"].(string); key != "" && !readFromCluster {
 			switch m := services[key]; len(m) {
 			case 0:
 			case 1:
@@ -217,6 +291,14 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 			default:
 				warnings = append(warnings, fmt.Sprintf("load balancer %q serves Kubernetes service %s, which %d manifests declare; brioly cannot tell which one is deployed", f.Name, key, len(m)))
 			}
+		}
+	}
+
+	// An Ingress no load balancer fact serves (an in-cluster controller, or
+	// a load balancer outside the scan) is an entry point of its own.
+	for _, f := range s.Facts {
+		if f.Kind == "k8s.ingress" && !servedIngress[f.ID] {
+			add(f, RoleNetworkEdge)
 		}
 	}
 

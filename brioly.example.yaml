@@ -34,6 +34,16 @@ sources:
     profile: prod-readonly
     regions: [ap-northeast-2]
 
+  # Optional: read what runs inside Kubernetes clusters (workloads, Services,
+  # Ingresses) from their API servers. Never Secrets, ConfigMaps or pods.
+  # eks: every EKS cluster the AWS scan finds, with the same AWS identity;
+  # that identity needs read access in the cluster, see
+  # docs/examples/kubernetes-readonly.yaml. Without this section, what runs
+  # in a cluster is known only from manifests in the repositories below.
+  # kubernetes:
+  #   eks: true
+  #   exclude_namespaces: [kube-system, kube-public, kube-node-lease]
+
   # Local checkouts. Set name to override the repository name.
   repos:
     - path: ../api

@@ -98,7 +98,8 @@
 | `pkg/diff` | 스냅샷 비교, 변경 이벤트, severity 규칙, 속성 변동 집계 |
 | `pkg/config` | `brioly.yaml` 로딩, `${VAR}` 치환(파싱 후 값 노드 단위) |
 | `pkg/collect/code` | 로컬 레포 수집기 |
-| `pkg/collect/aws` | AWS 수집기. 서비스별 좁은 인터페이스로 fake 테스트 가능. Kubernetes API에는 접속하지 않음(EKS는 AWS API와 태그, 레포 매니페스트로만) |
+| `pkg/collect/aws` | AWS 수집기. 서비스별 좁은 인터페이스로 fake 테스트 가능. 찾은 EKS 클러스터와 엔드포인트(호스트 → 사실)를 다음 수집기에 넘김 |
+| `pkg/collect/kube` | Kubernetes 수집기(선택). 클러스터 API에서 워크로드·Service·Ingress만 GET으로 읽음. Secret·ConfigMap·파드는 읽지 않음. 의존성 없는 HTTP 클라이언트, 테스트는 가짜 API 서버 |
 | `pkg/redact` | gitleaks 기반 secret 마스킹 |
 | `pkg/enrich` | 유일한 LLM 사용처: 컴포넌트별 설명, 개요, JD 초안. 글쓰기 규칙은 `guide.md`, 이전 답(`written.json`)을 받아 바뀐 부분만 수정, 온보딩 문서는 코드로 조립 |
 | `pkg/render` | 결정적 문서와 다이어그램, `[[fact-id]]` 인용 해석 |

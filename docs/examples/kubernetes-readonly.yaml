@@ -1,0 +1,47 @@
+# Read access for brioly inside a Kubernetes cluster.
+#
+# brioly lists workloads, Services and Ingresses, nothing else. It does not
+# read Secrets, ConfigMaps, pods or logs, and this role does not allow it to.
+#
+#   kubectl apply -f kubernetes-readonly.yaml
+#
+# Then map the AWS identity brioly scans with to the group below. On EKS,
+# with an access entry (replace the ARN with the user or role brioly uses):
+#
+#   aws eks create-access-entry --cluster-name <CLUSTER> \
+#     --principal-arn arn:aws:iam::<ACCOUNT_ID>:role/brioly-readonly \
+#     --kubernetes-groups brioly:readers
+#
+# The identity also needs eks:DescribeCluster (see aws-readonly-policy.json).
+# Without the mapping the cluster answers 401 or 403; brioly then reports the
+# cluster as not read and keeps what an earlier scan saw of it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: brioly-readonly
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["list"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: brioly-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: brioly-readonly
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: brioly:readers

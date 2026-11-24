@@ -147,7 +147,13 @@ func Collect(ctx context.Context, opts Options) (collect.Result, error) {
 			RDS:    rds.NewFromConfig(rcfg),
 			Lambda: lambda.NewFromConfig(rcfg),
 		}
-		res.Merge(CollectRegion(ctx, clients, acct, region, now()))
+		r := CollectRegion(ctx, clients, acct, region, now())
+		// The collector only knows where a cluster is; the credentials to
+		// open it come from this configuration.
+		for i := range r.Clusters {
+			r.Clusters[i].Token = eksToken(rcfg, r.Clusters[i].Name)
+		}
+		res.Merge(r)
 	}
 	return res, nil
 }
@@ -183,6 +189,7 @@ func CollectRegion(ctx context.Context, c Clients, acct Account, region string, 
 	s.collectECS()
 	s.collectLambda()
 	s.linkDependencies()
+	s.res.Endpoints = s.endpoints
 	return s.res
 }
 

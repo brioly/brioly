@@ -343,3 +343,22 @@ M3의 부분 재작성을 위해 문서의 각 블록은 근거 Fact를 가리�
 - 컴포넌트를 묶는 규칙이 만든 관계(`rule:*`)는 복사하지 않고 다시 계산합니다.
 - 분류 기준(스키마 버전, `RegistryVersion`, 라벨 허용 목록)이 다른 스냅샷에서는 이어받지 않습니다.
 - 한계: 사실이 없는 종류의 조회 실패(예: 네트워크 인터페이스)에서 나온 관계는 이어받지 못합니다. 이 경우 문서는 "읽지 못함"이라고만 씁니다. 읽지 못하는 동안 실제로 삭제된 리소스는 조회가 복구될 때까지 문서에 남습니다.
+
+## Kubernetes 클러스터 읽기 (2026-11-24 추가)
+
+`sources.kubernetes.eks: true`이면 AWS 스캔이 찾은 EKS 클러스터마다 API 서버를 읽습니다(`pkg/collect/kube`). 인증은 스캔에 쓰는 AWS 신원으로 만든 단기 토큰이고, 저장하지 않습니다.
+
+| 읽는 것 | 사실 | 구조 속성 |
+|---|---|---|
+| Deployment, StatefulSet, DaemonSet, CronJob | `k8s.workload` | 종류, 네임스페이스, 이미지 저장소, 포트, 스케줄 |
+| Service | `k8s.service` | 타입, 포트, 포트 매핑 |
+| Ingress | `k8s.ingress` | 클래스, 호스트, 경로 → Service, TLS 여부 |
+
+- **읽지 않는 것**: Secret, ConfigMap, 파드, 로그. 요청 자체를 보내지 않으며 예시 ClusterRole에도 권한이 없습니다.
+- **환경변수**: 파드 템플릿에는 값이 평문으로 들어 있습니다. 이름만 `container_env_keys`(detail)로 남기고, 값은 메모리에서 의존 관계를 찾는 데만 쓰고 버립니다.
+- **ID**: `k8s:<클러스터 사실 ID>:<namespace>/<kind>/<name>`. 레포 매니페스트에서 나온 같은 kind의 사실과는 `source.connector`(`kubernetes`)로 구분합니다.
+- **관계(모두 observed)**: 워크로드·Service·Ingress `runs_on` 클러스터, Service `routes_to` 워크로드(selector가 파드 라벨에 포함), Ingress `routes_to` Service, 로드 밸런서 `routes_to` Service·Ingress(status가 보고하는 DNS 이름이 AWS 수집기가 본 이름과 같을 때), 워크로드 `depends_on` 엔드포인트·Service(환경변수 값의 호스트 이름이 정확히 일치할 때).
+- **매니페스트와의 연결(inferred)**: 종류·네임스페이스·이름이 같은 매니페스트가 정확히 하나일 때 `defines` 관계로 잇고, 매니페스트는 실행 중인 워크로드의 컴포넌트에 들어갑니다. 여러 개면 잇지 않고 경고합니다.
+- **기본 제외**: `kube-system`, `kube-public`, `kube-node-lease` 네임스페이스와 `default/kubernetes` Service.
+- **실패 처리**: 401·403은 coverage `denied`, 일부 목록만 실패하면 `partial`. 이전 스캔에서 읽은 사실은 `CarryForward`로 유지됩니다.
+- 클러스터를 읽지 않으면 이전처럼 로드 밸런서 태그와 매니페스트로 추론합니다.
