@@ -74,6 +74,42 @@ func TestCitationsResolveFactsComponentsAndNotes(t *testing.T) {
 	}
 }
 
+// The text code adds to a model-written document follows the language the
+// model wrote in; the English one is what it always was.
+func TestWrittenFollowsTheLanguage(t *testing.T) {
+	s := testSnapshot(t)
+	md := "We use ECS [[aws:svc-1]] and Redis [[aws:redis]]."
+	en, unknown := Written(s, Document{Markdown: md, Published: true}, "m@v1")
+	if unknown != 1 || !strings.HasPrefix(en, "> Written by m@v1 from collected facts. Each statement cites its source; inferences are marked as such. 1 statement(s) cite sources that do not exist and are marked unverified.\n\n") ||
+		!strings.Contains(en, "**Sources (internal — remove before publishing)**") || !strings.Contains(en, Unverified) {
+		t.Errorf("English:\n%s", en)
+	}
+	if same, _ := Written(s, Document{Markdown: md, Published: true, Language: "English"}, "m@v1"); same != en {
+		t.Error("no language and English should read the same")
+	}
+	if other, _ := Written(s, Document{Markdown: md, Published: true, Language: "Klingon"}, "m@v1"); other != en {
+		t.Error("a language without a wording should read in English")
+	}
+	for language, want := range map[string][]string{
+		"Korean":   {"> 수집된 사실을 바탕으로 작성된 문서입니다(작성: m@v1).", "서술 1개는", "**출처 (내부용 — 게시 전에 삭제하세요)**", "(확인되지 않음)"},
+		"Japanese": {"> 収集された事実をもとに作成された文書です(作成: m@v1)。", "記述が1件あり", "**出典(社内用 — 公開前に削除してください)**", "(未確認)"},
+	} {
+		got, unknown := Written(s, Document{Markdown: md, Published: true, Language: language}, "m@v1")
+		if unknown != 1 || strings.Contains(got, "Written by") || strings.Contains(got, "remove before publishing") || strings.Contains(got, "unverified") {
+			t.Errorf("%s: English text left in:\n%s", language, got)
+		}
+		for _, w := range want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: missing %q in:\n%s", language, w, got)
+			}
+		}
+		// The source list is the same in every language.
+		if l := "[^" + footnoteLabel("aws:svc-1") + "]: aws.ecs.service **api** — `svc-1`"; !strings.Contains(got, l) {
+			t.Errorf("%s: missing source %q", language, l)
+		}
+	}
+}
+
 func TestArchitectureContent(t *testing.T) {
 	g := newGraph(testSnapshot(t))
 	doc := Architecture(g, Diagram(g))
