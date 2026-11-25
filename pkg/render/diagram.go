@@ -224,5 +224,18 @@ func shortKind(f facts.Fact) string {
 
 // label makes text safe inside a quoted Mermaid label.
 func label(s string) string {
-	return strings.NewReplacer(`"`, "'", "<", "&lt;", ">", "&gt;", "\n", " ").Replace(s)
+	// A label sits inside "…" in the Mermaid source and is laid out as
+	// HTML: quotes would end it, angle brackets would be markup, "#…;" is
+	// Mermaid's own entity syntax, and a line break would let a value start
+	// a line of its own in the diagram (or close the fence around it).
+	s = strings.Map(func(c rune) rune {
+		if isBreak(c) {
+			return ' '
+		}
+		return c
+	}, s)
+	return strings.NewReplacer(`"`, "'", "<", "&lt;", ">", "&gt;", "&", "&amp;", "#", "&num;", "`", "'",
+		// "%%{…}%%" anywhere in the source, quoted or not, is a directive
+		// that sets the diagram's configuration; "$$" starts math.
+		"%", "&percnt;", "{", "&lbrace;", "}", "&rbrace;", "$", "&dollar;").Replace(s)
 }

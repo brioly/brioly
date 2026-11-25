@@ -97,8 +97,8 @@ func TestCombineTakesOnlyTheSourcesThePrimaryDidNotRead(t *testing.T) {
 var fakeToken = "ghp_" + strings.Repeat("aB3dE5fG7h", 3) + "J9kL1m"
 
 // A snapshot from elsewhere is not trusted to have masked its secrets, in
-// any tier, nor to hold only plain text.
-func TestCleanMasksEveryTierAndMakesTextPlain(t *testing.T) {
+// any tier, nor to be free of line breaks.
+func TestCleanMasksEveryTierAndBoundsText(t *testing.T) {
 	f := workload("k8s:prod/shop")
 	f.Name = "shop\n\n# Sign in again\n[here](https://evil.example) <img src=x> `code`"
 	f.Attributes["workload_kind"] = "Deployment " + fakeToken
@@ -118,7 +118,12 @@ func TestCleanMasksEveryTierAndMakesTextPlain(t *testing.T) {
 	}
 	raw, _ := json.Marshal(s)
 	out := string(raw)
-	for _, bad := range []string{fakeToken, "hunter2hunter2", "\\n", "<img", "[here]", "`code`", "a note that is not sent on"} {
+	// The value keeps its characters: showing them as text is the
+	// renderer's job (render.Escape), not a reason to rewrite what was sent.
+	if !strings.Contains(out, "[here](https://evil.example)") {
+		t.Errorf("the name was rewritten: %s", out)
+	}
+	for _, bad := range []string{fakeToken, "hunter2hunter2", "\\n", "a note that is not sent on"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("%q survived: %s", bad, out)
 		}

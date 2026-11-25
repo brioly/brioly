@@ -29,8 +29,14 @@ const (
 // to a directory (brioly Cloud serves documents from stored snapshots) use
 // this; Write is Files plus the file system.
 func Files(s *facts.Snapshot) (map[string][]byte, error) {
-	g := newGraph(s)
-	diagram := Diagram(g)
+	// Documents are written from a copy whose values are escaped; the
+	// diagram escapes its own labels and facts.json is the snapshot as it is.
+	text, err := escaped(s)
+	if err != nil {
+		return nil, err
+	}
+	g := newGraph(text)
+	diagram := Diagram(newGraph(s))
 	files := map[string][]byte{
 		ArchitectureFile: []byte(Architecture(g, diagram)),
 		TechStackFile:    []byte(TechStack(g)),
@@ -156,12 +162,12 @@ func Architecture(g *graph, diagram string) string {
 			fmt.Fprintf(&b, "### %s (%s, %s)\n\n- Source: %s\n", displayName(lb), strAttr(lb, "type"), strAttr(lb, "scheme"), evidence(lb))
 			writeKubernetesOwner(&b, g, lb)
 			for _, l := range g.targets(lb.ID, facts.EdgeContains) {
-				fmt.Fprintf(&b, "- Listener %s:%s, default action `%s`\n", strAttr(l, "protocol"), strAttr(l, "port"), strAttr(l, "default_action"))
+				fmt.Fprintf(&b, "- Listener %s:%s, default action %s\n", strAttr(l, "protocol"), strAttr(l, "port"), code(strAttr(l, "default_action")))
 				for _, tg := range g.targets(l.ID, facts.EdgeRoutesTo) {
 					writeTargetGroup(&b, g, tg, "  - default → ")
 				}
 				for _, r := range byPriority(g.targets(l.ID, facts.EdgeContains)) {
-					fmt.Fprintf(&b, "  - Rule %s when `%s`\n", strAttr(r, "priority"), strings.Join(listAttr(r, "conditions"), " AND "))
+					fmt.Fprintf(&b, "  - Rule %s when %s\n", strAttr(r, "priority"), code(strings.Join(listAttr(r, "conditions"), " AND ")))
 					for _, tg := range g.targets(r.ID, facts.EdgeRoutesTo) {
 						writeTargetGroup(&b, g, tg, "    - → ")
 					}
@@ -200,7 +206,7 @@ func writeTargetGroup(b *strings.Builder, g *graph, tg facts.Fact, prefix string
 	}
 	health := ""
 	if p := strAttr(tg, "health_check_path"); p != "" {
-		health = ", health check `" + p + "`"
+		health = ", health check " + code(p)
 	} else if p := strAttr(tg, "health_check_protocol"); p != "" {
 		health = ", " + p + " health check"
 	}
@@ -214,13 +220,13 @@ func writeKubernetesOwner(b *strings.Builder, g *graph, lb facts.Fact) {
 	cluster := strAttr(lb, "k8s_cluster")
 	in := ""
 	if cluster != "" {
-		in = " in cluster `" + cluster + "`"
+		in = " in cluster " + code(cluster)
 	}
 	if v := strAttr(lb, "k8s_service"); v != "" {
-		fmt.Fprintf(b, "- Created by Kubernetes for Service `%s`%s (AWS name: `%s`)\n", v, in, strAttr(lb, "lb_name"))
+		fmt.Fprintf(b, "- Created by Kubernetes for Service %s%s (AWS name: %s)\n", code(v), in, code(strAttr(lb, "lb_name")))
 	}
 	if v := strAttr(lb, "k8s_ingress"); v != "" {
-		fmt.Fprintf(b, "- Created by Kubernetes for Ingress `%s`%s (AWS name: `%s`)\n", v, in, strAttr(lb, "lb_name"))
+		fmt.Fprintf(b, "- Created by Kubernetes for Ingress %s%s (AWS name: %s)\n", code(v), in, code(strAttr(lb, "lb_name")))
 	}
 	for _, in := range g.targets(lb.ID, facts.EdgeRoutesTo) {
 		if in.Kind == "k8s.ingress" {
@@ -232,7 +238,7 @@ func writeKubernetesOwner(b *strings.Builder, g *graph, lb facts.Fact) {
 		var names []string
 		for _, w := range g.targets(svc.ID, facts.EdgeRoutesTo) {
 			if w.Kind == "k8s.workload" {
-				names = append(names, fmt.Sprintf("%s `%s` (%s)", strAttr(w, "workload_kind"), displayName(w), evidence(w)))
+				names = append(names, fmt.Sprintf("%s %s (%s)", strAttr(w, "workload_kind"), code(displayName(w)), evidence(w)))
 			}
 		}
 		ports := ""
@@ -242,7 +248,7 @@ func writeKubernetesOwner(b *strings.Builder, g *graph, lb facts.Fact) {
 		if live(svc) {
 			// Read from the cluster: the Service reports this load balancer
 			// and its selector was matched against the running workloads.
-			fmt.Fprintf(b, "- Kubernetes Service `%s/%s`%s selects %s — %s\n", strAttr(svc, "namespace"), displayName(svc), ports, orNone(names), evidence(svc))
+			fmt.Fprintf(b, "- Kubernetes Service %s%s selects %s — %s\n", code(strAttr(svc, "namespace")+"/"+displayName(svc)), ports, orNone(names), evidence(svc))
 			continue
 		}
 		fmt.Fprintf(b, "- Inferred: that Service is declared in %s%s and selects %s\n", evidence(svc), ports, orNone(names))
@@ -253,15 +259,15 @@ func writeKubernetesOwner(b *strings.Builder, g *graph, lb facts.Fact) {
 func writeIngress(b *strings.Builder, g *graph, in facts.Fact, prefix string) {
 	class := ""
 	if c := strAttr(in, "ingress_class"); c != "" {
-		class = ", class `" + c + "`"
+		class = ", class " + code(c)
 	}
 	tls := ""
 	if boolAttr(in, "tls") {
 		tls = ", TLS"
 	}
-	fmt.Fprintf(b, "%sKubernetes Ingress `%s/%s`%s%s — %s\n", prefix, strAttr(in, "namespace"), displayName(in), class, tls, evidence(in))
+	fmt.Fprintf(b, "%sKubernetes Ingress %s%s%s — %s\n", prefix, code(strAttr(in, "namespace")+"/"+displayName(in)), class, tls, evidence(in))
 	for _, r := range listAttr(in, "routes") {
-		fmt.Fprintf(b, "  - `%s`\n", r)
+		fmt.Fprintf(b, "  - %s\n", code(r))
 	}
 }
 
@@ -307,7 +313,7 @@ func writeClusterWorkloads(b *strings.Builder, g *graph, clusters []facts.Fact) 
 			}
 			kind := strAttr(w, "workload_kind")
 			if s := strAttr(w, "schedule"); s != "" {
-				kind += " `" + s + "`"
+				kind += " " + code(s)
 			}
 			fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n", mdEscape(displayName(w)), mdEscape(kind), strAttr(w, "namespace"),
 				mdEscape(strings.Join(listAttr(w, "image_repositories"), ", ")), strings.Trim(strings.Join(strings.Fields(strAttr(w, "ports")), ", "), "[]"),
@@ -370,7 +376,7 @@ func writeCompute(b *strings.Builder, g *graph) {
 			if v := strAttr(c, "version"); v != "" {
 				version = "Kubernetes " + v
 			}
-			fmt.Fprintf(b, "- Cluster **%s**: %s, API server `%s` — %s\n", displayName(c), version, strAttr(c, "server"), evidence(c))
+			fmt.Fprintf(b, "- Cluster **%s**: %s, API server %s — %s\n", displayName(c), version, code(strAttr(c, "server")), evidence(c))
 		}
 		b.WriteString("\n")
 		writeClusterWorkloads(b, g, kclusters)
@@ -413,8 +419,8 @@ func writeCompute(b *strings.Builder, g *graph) {
 			if lt == "" {
 				lt = strAttr(a, "launch_configuration")
 			}
-			fmt.Fprintf(b, "- Auto Scaling group **%s**: %s–%s instances from `%s` — %s\n", displayName(a),
-				strAttr(a, "min_size"), strAttr(a, "max_size"), lt, evidence(a))
+			fmt.Fprintf(b, "- Auto Scaling group **%s**: %s–%s instances from %s — %s\n", displayName(a),
+				strAttr(a, "min_size"), strAttr(a, "max_size"), code(lt), evidence(a))
 		}
 		for _, in := range instances {
 			fmt.Fprintf(b, "- Instance **%s** (%s) — %s\n", displayName(in), strAttr(in, "instance_type"), evidence(in))
@@ -497,8 +503,8 @@ func writeExposure(b *strings.Builder, g *graph) {
 				if _, known := sg.Details["other_interfaces"]; !known && len(attached) == 0 {
 					use = "no attachment found; network interfaces were not read"
 				}
-				lines = append(lines, fmt.Sprintf("- Security group **%s** allows `%s` (%s) — %s",
-					displayName(sg), rule, use, evidence(sg)))
+				lines = append(lines, fmt.Sprintf("- Security group **%s** allows %s (%s) — %s",
+					displayName(sg), code(rule), use, evidence(sg)))
 			}
 		}
 	}
@@ -537,7 +543,7 @@ func writeCoverageWarnings(b *strings.Builder, s *facts.Snapshot) {
 		if c.Region != "" {
 			where += "/" + c.Region
 		}
-		lines = append(lines, fmt.Sprintf("- `%s` in %s: **%s**", c.Kind, where, c.Status))
+		lines = append(lines, fmt.Sprintf("- %s in %s: **%s**", code(c.Kind), where, c.Status))
 	}
 	if len(lines) == 0 {
 		return
@@ -593,7 +599,7 @@ func writeNotes(b *strings.Builder, s *facts.Snapshot) {
 			// this scan. Keep showing the note: it is someone's knowledge.
 			target = a.TargetName
 			if target == "" {
-				target = a.Target
+				target = Escape(a.Target)
 			}
 			target += " (no longer found)"
 		}
