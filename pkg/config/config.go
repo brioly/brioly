@@ -30,6 +30,8 @@ type Config struct {
 	LLM     LLM     `yaml:"llm"`
 	Docs    Docs    `yaml:"docs"`
 	Sources Sources `yaml:"sources"`
+	// Cloud is where brioly sync sends facts. Optional.
+	Cloud Cloud `yaml:"cloud"`
 	// Components is the path of the components file (names, owners, merges
 	// and notes written by people). Default: components.yaml next to
 	// brioly.yaml. The file is optional.
@@ -44,6 +46,19 @@ type Config struct {
 }
 
 // LLM configures the bring-your-own-key model access.
+// Cloud says where brioly sync sends what it collected.
+type Cloud struct {
+	// URL is the address of brioly Cloud's sync endpoint; empty means
+	// DefaultCloudURL.
+	URL string `yaml:"url"`
+	// Token is a sync token made in the workspace. Write a reference
+	// (${BRIOLY_TOKEN}), not the value.
+	Token string `yaml:"token"`
+}
+
+// DefaultCloudURL is brioly Cloud's sync endpoint.
+const DefaultCloudURL = "https://app.brioly.io/sync"
+
 type LLM struct {
 	APIKey string `yaml:"api_key"`
 	Model  string `yaml:"model"`
