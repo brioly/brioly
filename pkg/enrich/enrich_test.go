@@ -355,3 +355,28 @@ func TestPreviousStateIsReusedAndRevised(t *testing.T) {
 		t.Errorf("a state of an unknown version was used: %d call(s)", len(fresh.prompts))
 	}
 }
+
+// One kind of document can be left out, with the requests only it needs.
+func TestOneKindOfDocumentCanBeLeftOut(t *testing.T) {
+	for _, c := range []struct {
+		name               string
+		opts               Options
+		overview, jd       int
+		onboarding, hasJDs bool
+	}{
+		{"only the guide", Options{NoJobDescriptions: true}, 1, 0, true, false},
+		{"only job descriptions, roles suggested", Options{NoOnboarding: true}, 1, 1, false, true},
+		{"only job descriptions, roles chosen", Options{NoOnboarding: true, JDRoles: []string{"Data Engineer"}}, 0, 1, false, true},
+	} {
+		m := &fakeModel{}
+		c.opts.Language = "English"
+		out, err := Run(context.Background(), m, snapshot(t, true, "1024"), c.opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.calls["component"] != 2 || m.calls["overview"] != c.overview || m.calls["jd"] != c.jd ||
+			(out.Onboarding != "") != c.onboarding || (len(out.JobDescriptions) > 0) != c.hasJDs {
+			t.Errorf("%s: calls %v, guide %d bytes, %d job descriptions", c.name, m.calls, len(out.Onboarding), len(out.JobDescriptions))
+		}
+	}
+}

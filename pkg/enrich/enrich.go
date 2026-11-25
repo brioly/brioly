@@ -59,6 +59,11 @@ type Options struct {
 	// whose input is unchanged is reused without a model call; a unit whose
 	// input changed is revised from its previous text instead of rewritten.
 	Previous *State
+	// NoOnboarding and NoJobDescriptions leave one kind of document out,
+	// with the requests only it needs. The components are described either
+	// way: both kinds are written from those descriptions.
+	NoOnboarding      bool
+	NoJobDescriptions bool
 }
 
 // State records, per unit of writing (a component, the overview, a job
@@ -223,20 +228,25 @@ func Run(ctx context.Context, m Model, s *facts.Snapshot, opts Options) (*Output
 		}
 	}
 
-	// 2. One overview call, from the summaries.
+	// 2. One overview call, from the summaries. It also suggests roles, so
+	// it is skipped only when neither the guide nor a suggestion is needed.
 	stack := stackJSON(s)
 	var ov overviewResponse
-	raw, err := w.ask(ctx, "overview", Request{System: system, Prompt: overviewPrompt(s, relations, stack, unknowns, len(opts.JDRoles) == 0), Schema: overviewSchema()})
-	if err != nil {
-		return nil, fmt.Errorf("write overview: %w", err)
-	}
-	if err := json.Unmarshal(raw, &ov); err != nil {
-		return nil, fmt.Errorf("write overview: invalid response: %w", err)
+	if !opts.NoOnboarding || (!opts.NoJobDescriptions && len(opts.JDRoles) == 0) {
+		raw, err := w.ask(ctx, "overview", Request{System: system, Prompt: overviewPrompt(s, relations, stack, unknowns, len(opts.JDRoles) == 0), Schema: overviewSchema()})
+		if err != nil {
+			return nil, fmt.Errorf("write overview: %w", err)
+		}
+		if err := json.Unmarshal(raw, &ov); err != nil {
+			return nil, fmt.Errorf("write overview: invalid response: %w", err)
+		}
 	}
 
 	// 3. One call per job role.
 	roles := opts.JDRoles
-	if len(roles) == 0 {
+	if opts.NoJobDescriptions {
+		roles = nil
+	} else if len(roles) == 0 {
 		for i, r := range ov.SuggestedRoles {
 			if i == 3 {
 				break
@@ -271,10 +281,13 @@ func Run(ctx context.Context, m Model, s *facts.Snapshot, opts Options) (*Output
 		return nil, err
 	}
 
-	out := &Output{Onboarding: assemble(s, ov, sections, notes), State: &w.next}
-	out.Uncited = append(out.Uncited, uncited("onboarding overview", ov.Overview)...)
-	for i, c := range s.Components {
-		out.Uncited = append(out.Uncited, uncited("onboarding, "+c.Name, sections[i].Section)...)
+	out := &Output{State: &w.next}
+	if !opts.NoOnboarding {
+		out.Onboarding = assemble(s, ov, sections, notes)
+		out.Uncited = append(out.Uncited, uncited("onboarding overview", ov.Overview)...)
+		for i, c := range s.Components {
+			out.Uncited = append(out.Uncited, uncited("onboarding, "+c.Name, sections[i].Section)...)
+		}
 	}
 	for i := range jds {
 		out.Uncited = append(out.Uncited, uncited("job description "+roles[i], jdBodies[i])...)

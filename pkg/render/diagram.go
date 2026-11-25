@@ -216,7 +216,8 @@ func shortKind(f facts.Fact) string {
 	case "k8s.cluster":
 		return strings.TrimSpace("Kubernetes " + strAttr(f, "version"))
 	case "k8s.workload":
-		return "Kubernetes " + strAttr(f, "workload_kind")
+		// Only the kind: the box of its cluster already says Kubernetes.
+		return strAttr(f, "workload_kind")
 	default:
 		return "EC2 " + strAttr(f, "instance_type")
 	}
