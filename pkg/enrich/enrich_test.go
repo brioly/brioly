@@ -3,7 +3,6 @@ package enrich
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -154,13 +153,15 @@ func TestRunDescribesComponentsAndAssemblesTheGuide(t *testing.T) {
 }
 
 func TestOnlyChangedComponentsAreRewritten(t *testing.T) {
-	dir := t.TempDir()
 	m := &fakeModel{}
+	var previous *State
 	run := func(s *facts.Snapshot) {
 		t.Helper()
-		if _, err := Run(context.Background(), Cached{Inner: m, Dir: dir}, s, Options{Language: "English", JDRoles: []string{"Cloud Engineer"}}); err != nil {
+		out, err := Run(context.Background(), m, s, Options{Language: "English", JDRoles: []string{"Cloud Engineer"}, Previous: previous})
+		if err != nil {
 			t.Fatal(err)
 		}
+		previous = out.State
 	}
 	run(snapshot(t, true, "1024"))
 	first := map[string]int{"component": m.calls["component"], "overview": m.calls["overview"], "jd": m.calls["jd"]}
@@ -206,27 +207,6 @@ func (s *scripted) JSON(context.Context, Request) ([]byte, error) {
 	return []byte(s.answers[s.calls-1]), nil
 }
 
-func TestCachedRejectsAndRepairsInvalidEntries(t *testing.T) {
-	dir := t.TempDir()
-	m := &scripted{answers: []string{`not json`, `{"ok":true}`, `{"ok":false}`}}
-	c := Cached{Inner: m, Dir: dir}
-	req := Request{System: "s", Context: "c", Prompt: "p", Schema: json.RawMessage(`{}`)}
-	if _, err := c.JSON(context.Background(), req); err == nil {
-		t.Fatal("invalid JSON from the model should be an error, not cached")
-	}
-	b, err := c.JSON(context.Background(), req)
-	if err != nil || string(b) != `{"ok":true}` {
-		t.Fatalf("second call = %s, %v", b, err)
-	}
-	b, _ = c.JSON(context.Background(), req)
-	if string(b) != `{"ok":true}` || m.calls != 2 {
-		t.Fatalf("cached answer not reused: %s after %d calls", b, m.calls)
-	}
-	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
-		t.Fatalf("cache dir has %d entries, want exactly one (no temp files left)", len(entries))
-	}
-}
-
 func TestDependencyChurnDoesNotRewriteComponents(t *testing.T) {
 	withDeps := func(deps ...string) *facts.Snapshot {
 		now := time.Unix(0, 0)
@@ -254,11 +234,13 @@ func TestDependencyChurnDoesNotRewriteComponents(t *testing.T) {
 		return s
 	}
 	m := &fakeModel{}
-	cached := Cached{Inner: m, Dir: t.TempDir()}
+	cached := m
 	opts := Options{Language: "English", JDRoles: []string{"Backend Engineer"}}
-	if _, err := Run(context.Background(), cached, withDeps("jest"), opts); err != nil {
+	first, err := Run(context.Background(), cached, withDeps("jest"), opts)
+	if err != nil {
 		t.Fatal(err)
 	}
+	opts.Previous = first.State
 	before := map[string]int{"component": m.calls["component"], "overview": m.calls["overview"], "jd": m.calls["jd"]}
 	if _, err := Run(context.Background(), cached, withDeps("jest", "eslint"), opts); err != nil {
 		t.Fatal(err)

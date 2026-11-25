@@ -4,8 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -18,7 +16,7 @@ const Unverified = "⚠️ *(unverified)*"
 
 var citation = regexp.MustCompile(`\[\[([^\[\]]+)\]\]`)
 
-// Document is an LLM-written document to resolve and write.
+// Document is a model-written document to resolve.
 type Document struct {
 	Path     string // relative to the output directory
 	Markdown string
@@ -108,24 +106,6 @@ func ResolveCitations(md string, s *facts.Snapshot, published bool) (string, int
 func footnoteLabel(id string) string {
 	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:])[:6]
-}
-
-// WriteDocuments resolves citations in each document and writes it. It
-// returns the total number of unverified citations.
-func WriteDocuments(dir string, s *facts.Snapshot, docs []Document, producer string) (int, error) {
-	total := 0
-	for _, d := range docs {
-		text, unknown := Written(s, d, producer)
-		total += unknown
-		p := filepath.Join(dir, d.Path)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return total, err
-		}
-		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
-			return total, err
-		}
-	}
-	return total, nil
 }
 
 // Written returns a model-written document as it is published: its

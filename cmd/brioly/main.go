@@ -1,7 +1,7 @@
 // Command brioly scans your infrastructure and code and writes architecture,
-// tech stack and onboarding documents.
+// and tech stack documents.
 //
-//	brioly generate [-c brioly.yaml] [-o dir] [--no-llm]
+//	brioly generate [-c brioly.yaml] [-o dir]
 //	brioly version
 package main
 
@@ -28,7 +28,6 @@ import (
 	"github.com/brioly/brioly/pkg/components"
 	"github.com/brioly/brioly/pkg/config"
 	"github.com/brioly/brioly/pkg/diff"
-	"github.com/brioly/brioly/pkg/enrich"
 	"github.com/brioly/brioly/pkg/facts"
 	"github.com/brioly/brioly/pkg/render"
 	"github.com/brioly/brioly/pkg/scan"
@@ -37,7 +36,7 @@ import (
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = `brioly keeps architecture and onboarding docs in sync with your infrastructure.
+const usage = `brioly keeps architecture and tech stack docs in sync with your infrastructure.
 
 Usage:
   brioly generate [flags]            scan sources and write documents locally
@@ -97,7 +96,9 @@ func generate(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("c", "brioly.yaml", "path to brioly.yaml")
 	outDir := fs.String("o", "", "output directory (default: output in brioly.yaml, or ./brioly-docs)")
-	noLLM := fs.Bool("no-llm", false, "write only documents that need no LLM (no API key required)")
+	// Kept so that commands written for earlier versions still run: the
+	// CLI never calls a model, so there is nothing left to turn off.
+	fs.Bool("no-llm", false, "no effect: the CLI never calls a model (kept for older scripts)")
 	history := fs.String("history", "", "also save the snapshot as facts-<time>.json in this directory, for brioly diff and replay")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -113,54 +114,13 @@ func generate(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if *outDir != "" {
 		cfg.Output, _ = filepath.Abs(*outDir)
 	}
-	if !*noLLM && cfg.LLM.APIKey == "" {
-		return errors.New("no LLM key: set llm.api_key in brioly.yaml (for example ${ANTHROPIC_API_KEY}), or run with --no-llm")
-	}
 
 	snap, err := snapshot(ctx, cfg, stderr)
 	if err != nil {
 		return err
 	}
 
-	var llmDocs []render.Document
-	var llmErr error
-	producer := cfg.LLM.Model + "@" + enrich.PromptVersion
-	if !*noLLM {
-		fmt.Fprintf(stderr, "writing documents with %s (only collected facts are sent; no source code)\n", cfg.LLM.Model)
-		cacheDir := filepath.Join(cfg.Output, ".cache")
-		// The cache is local state; keep it out of commits of the output.
-		if err := os.MkdirAll(cacheDir, 0o700); err == nil {
-			_ = os.WriteFile(filepath.Join(cacheDir, ".gitignore"), []byte("*\n"), 0o644)
-		}
-		model := enrich.Cached{Inner: enrich.NewClaude(cfg.LLM.APIKey, cfg.LLM.Model), Dir: filepath.Join(cacheDir, "llm")}
-		statePath := filepath.Join(cfg.Output, WrittenFile)
-		out, err := enrich.Run(ctx, model, snap, enrich.Options{Language: cfg.Docs.Language, JDRoles: cfg.Docs.JDRoles, Previous: loadWritten(statePath)})
-		if err != nil {
-			llmErr = err
-			fmt.Fprintln(stderr, "error: LLM step failed; writing the deterministic documents only:", err)
-		} else {
-			llmDocs = append(llmDocs, render.Document{Path: OnboardingFile, Markdown: out.Onboarding})
-			if err := saveWritten(statePath, out.State); err != nil {
-				fmt.Fprintln(stderr, "warning: could not save", WrittenFile+":", err)
-			}
-			if len(out.Uncited) > 0 {
-				fmt.Fprintf(stderr, "warning: %d passage(s) written by the model cite no source; check them:\n", len(out.Uncited))
-				for _, u := range out.Uncited {
-					fmt.Fprintln(stderr, "  -", u)
-				}
-			}
-			used := map[string]bool{}
-			for _, jd := range out.JobDescriptions {
-				path := render.UniquePath(used, "jd/", render.Slug(jd.Role), ".md")
-				llmDocs = append(llmDocs, render.Document{Path: path, Markdown: jd.Markdown, Published: true})
-			}
-		}
-	}
 	if err := render.Write(cfg.Output, snap); err != nil {
-		return err
-	}
-	unverified, err := render.WriteDocuments(cfg.Output, snap, llmDocs, producer)
-	if err != nil {
 		return err
 	}
 	if *history != "" {
@@ -181,19 +141,10 @@ func generate(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		fmt.Fprintf(stdout, "%d part(s) of the scan were incomplete; see the top of architecture.md.\n", incomplete)
 	}
 	written := []string{render.ArchitectureFile, render.TechStackFile, render.DiagramFile, render.FactsFile}
-	for _, d := range llmDocs {
-		written = append(written, d.Path)
-	}
 	fmt.Fprintf(stdout, "Wrote %s to %s\n", strings.Join(written, ", "), cfg.Output)
-	if unverified > 0 {
-		fmt.Fprintf(stdout, "%d statement(s) cited facts that do not exist; they are marked unverified in the documents.\n", unverified)
-	}
 	fmt.Fprintln(stdout, "\nTip: brioly Cloud (in development) keeps a history of these facts and alerts you to the changes that matter.")
-	return llmErr
+	return nil
 }
-
-// OnboardingFile is the onboarding guide written by the LLM step.
-const OnboardingFile = "onboarding.md"
 
 // snapshot scans the configured sources and returns a finalized snapshot
 // with secrets masked and components built.
@@ -347,32 +298,6 @@ func replayCmd(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprint(stdout, "\n"+churn.Format())
 	return nil
-}
-
-// WrittenFile holds what the model wrote on the last run. It is committed
-// with the documents: the next run reuses unchanged parts without a model
-// call and revises changed parts instead of rewriting them, which keeps the
-// diff of a documentation pull request small.
-const WrittenFile = "written.json"
-
-func loadWritten(path string) *enrich.State {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var st enrich.State
-	if json.Unmarshal(b, &st) != nil {
-		return nil // unreadable: write from scratch
-	}
-	return &st
-}
-
-func saveWritten(path string, st *enrich.State) error {
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
 // syncCmd scans like generate and sends the facts to a brioly Cloud

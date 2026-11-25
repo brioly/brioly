@@ -85,7 +85,7 @@ func TestArchitectureContent(t *testing.T) {
 		"**api** uses **main-db** (aws.rds.cluster)",
 		"Security group **alb** allows `tcp:443:0.0.0.0/0` (attached to: api-prod)",
 		"`svc-1`", // evidence link
-		"| API | backend_api | platform | Serves requests. | api, api, api — `svc-1` |",
+		"| API | backend_api | api, api, api — `svc-1` |",
 		"- **API**: Moved to Fargate in 2025. — bee",
 	} {
 		if !strings.Contains(doc, want) {

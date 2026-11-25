@@ -8,16 +8,6 @@ version: 1
 # Where documents are written.
 output: brioly-docs
 
-# Bring your own key. Only collected facts are sent to the model, never
-# source code or environment variable values. Use --no-llm to skip this.
-llm:
-  api_key: ${ANTHROPIC_API_KEY}
-  model: claude-opus-5-5
-
-docs:
-  language: English          # e.g. Korean, Japanese, German
-  jd_roles: []               # e.g. ["Backend Engineer", "Cloud Engineer"]; empty = suggest
-
 # Optional: send what is collected to a brioly Cloud workspace with
 # `brioly sync`. Create the token in the workspace (Sources, brioly CLI) and
 # keep it out of this file: set BRIOLY_TOKEN in your environment or in

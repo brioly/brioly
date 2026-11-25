@@ -19,12 +19,10 @@
 #   with "Not authorized to perform sts:AssumeRoleWithWebIdentity".
 # - Allow workflows to open pull requests: repository Settings > Actions >
 #   General > "Allow GitHub Actions to create and approve pull requests".
-# - Add the ANTHROPIC_API_KEY repository secret (or run with --no-llm).
-# - Commit everything brioly writes, including facts.json and written.json:
-#   the next run compares against the first and revises from the second. To
-#   keep them out of the way in reviews, add to .gitattributes:
+# - Commit everything brioly writes, including facts.json: the next run
+#   compares against it. To keep it out of the way in reviews, add to
+#   .gitattributes:
 #     docs/brioly/facts.json linguist-generated=true
-#     docs/brioly/written.json linguist-generated=true
 name: brioly docs
 
 on:
@@ -58,16 +56,6 @@ jobs:
       # Replace <VERSION> with a released version; do not use @latest here.
       - run: go install github.com/brioly/brioly/cmd/brioly@<VERSION> # module path is provisional
 
-      # Answers of the model for prompts already asked. Until a documentation
-      # pull request is merged, every run sees the same change again; with
-      # this cache it does not pay for the same answer twice. brioly keeps
-      # the directory out of git with its own .gitignore.
-      - uses: actions/cache@v4 # pin to a commit SHA
-        with:
-          path: docs/brioly/.cache
-          key: brioly-llm-${{ github.run_id }}
-          restore-keys: brioly-llm-
-
       # The last committed facts.json is the baseline; keep a copy before
       # generate overwrites it.
       - name: Keep the committed snapshot
@@ -78,11 +66,7 @@ jobs:
           fi
 
       - name: Generate documents
-        # The API key is only visible to this step. Drop the env block and
-        # add --no-llm to skip the LLM-written documents.
         run: brioly generate -c brioly.yaml
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       # facts.json always differs between runs (it records scan times), so
       # `brioly diff`, not the file contents, decides whether to open a pull
