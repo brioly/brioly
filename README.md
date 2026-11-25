@@ -52,7 +52,7 @@ brioly diff old/facts.json new/facts.json   # what changed, rated by fixed rules
 - In a Kubernetes cluster brioly only lists workloads, Services and Ingresses. It never reads Secrets, ConfigMaps, pods or logs, and the [example role](docs/examples/kubernetes-readonly.yaml) does not allow it. The same caveat applies as for ECS: a workload's pod template contains environment variable values in plain text, and brioly keeps their names only.
 - URL credentials (`https://user:pass@...`) are stripped from collected values.
 - Collectors copy only the fields they declare; the raw API responses are never stored, logged or sent to a model. On top of that, values that look like secrets are masked with [gitleaks](https://github.com/gitleaks/gitleaks) rules before anything is written or sent.
-- Use a read-only AWS profile. [docs/examples/aws-readonly-policy.json](docs/examples/aws-readonly-policy.json) lists every action brioly calls; an action you leave out is reported as an incomplete part of the scan, not as missing resources.
+- Use a read-only AWS profile (one from `~/.aws/config` or `~/.aws/credentials`, so an access key kept there works). [docs/examples/aws-readonly-policy.json](docs/examples/aws-readonly-policy.json) lists every action brioly calls; an action you leave out is reported as an incomplete part of the scan, not as missing resources.
 
 ## What leaves your machine
 

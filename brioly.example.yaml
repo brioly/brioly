@@ -37,7 +37,11 @@ labels:
 
 sources:
   # AWS uses the standard credential chain (profile, SSO, environment, OIDC).
-  # Use a read-only profile; brioly only calls Describe/List APIs.
+  # The profile is one from ~/.aws/config or ~/.aws/credentials, so an access
+  # key kept in ~/.aws/credentials works as it is. Without a profile the
+  # environment and then the default profile are used. brioly only calls
+  # Describe/List APIs: docs/examples/aws-readonly-policy.json is all the
+  # identity needs.
   aws:
     profile: prod-readonly
     regions: [ap-northeast-2]
