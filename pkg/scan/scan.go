@@ -54,6 +54,9 @@ type Options struct {
 type Repo struct {
 	Path string
 	Name string // optional override of the repository name
+	// Owner is the GitHub account, for a copy that is not a checkout (a
+	// downloaded archive). git is never run on such a copy.
+	Owner string
 }
 
 // AWS selects an account and its regions.
@@ -160,7 +163,7 @@ func collectAll(ctx context.Context, opts Options, logf func(string, ...any)) (*
 	var res collect.Result
 	for _, repo := range opts.Repos {
 		logf("scanning repository %s", repo.Path)
-		r, err := code.Collect(code.Options{Path: repo.Path, Name: repo.Name})
+		r, err := code.Collect(code.Options{Path: repo.Path, Name: repo.Name, Owner: repo.Owner})
 		if err != nil {
 			return nil, err
 		}
