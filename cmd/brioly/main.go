@@ -178,7 +178,7 @@ func snapshot(ctx context.Context, cfg *config.Config, stderr io.Writer) (*facts
 	if a := cfg.Sources.AWS; a != nil {
 		opts.AWS = &scan.AWS{Profile: a.Profile, Regions: a.Regions}
 	}
-	if k := cfg.Sources.Kubernetes; k != nil {
+	if k := cfg.Sources.K8s; k != nil {
 		opts.Kubernetes = &scan.Kubernetes{EKS: k.EKS, Kubeconfig: k.Kubeconfig, Contexts: k.Contexts, ExcludeNamespaces: k.ExcludeNamespaces}
 	}
 	return scan.Run(ctx, opts)

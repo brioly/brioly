@@ -111,7 +111,7 @@ func LoadKubeconfig(paths string, contexts []string) ([]Target, error) {
 			}
 		}
 		if len(contexts) == 0 {
-			return nil, errors.New("kubeconfig: no current-context is set; name the contexts to read in sources.kubernetes.contexts")
+			return nil, errors.New("kubeconfig: no current-context is set; name the contexts to read in sources.k8s.contexts")
 		}
 	}
 	var targets []Target

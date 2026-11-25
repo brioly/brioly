@@ -348,8 +348,8 @@ M3의 부분 재작성을 위해 문서의 각 블록은 근거 Fact를 가리�
 
 클러스터의 API 서버를 읽는 방법은 두 가지입니다(`pkg/collect/kube`). 자격 증명은 어느 쪽도 저장하지 않습니다.
 
-- **kubeconfig**: 환경변수 `KUBECONFIG`(또는 `sources.kubernetes.kubeconfig`)의 현재 컨텍스트를 그 파일이 정한 자격 증명(토큰, 클라이언트 인증서, exec 플러그인)으로 읽습니다. EKS·GKE·AKS·자체 구축을 가리지 않습니다. `~/.kube/config`를 스스로 찾아 읽지는 않습니다.
-- **`sources.kubernetes.eks: true`**: AWS 스캔이 찾은 EKS 클러스터마다, 스캔에 쓰는 AWS 신원으로 만든 단기 토큰으로 읽습니다. kubeconfig가 필요 없습니다.
+- **kubeconfig**: brioly.yaml의 `sources.k8s.kubeconfig`가 가리키는 파일의 현재 컨텍스트(또는 `contexts`에 적은 컨텍스트)를 그 파일이 정한 자격 증명(토큰, 클라이언트 인증서, exec 플러그인)으로 읽습니다. EKS·GKE·AKS·자체 구축을 가리지 않습니다. 환경변수 `KUBECONFIG`나 `~/.kube/config`를 스스로 찾아 읽지는 않습니다(예전 이름 `sources.kubernetes`는 경고와 함께 읽힘).
+- **`sources.k8s.eks: true`**: AWS 스캔이 찾은 EKS 클러스터마다, 스캔에 쓰는 AWS 신원으로 만든 단기 토큰으로 읽습니다. kubeconfig가 필요 없습니다.
 
 kubeconfig의 API 서버가 AWS 스캔이 찾은 EKS 클러스터와 같으면 그 `aws.eks.cluster` 사실에 붙이고 한 번만 읽습니다. 그렇지 않으면 클러스터를 나타내는 `k8s.cluster` 사실(ID `k8s:cluster:<API 서버 호스트>`, 구조 속성은 버전)을 만듭니다. 이름은 kubeconfig의 클러스터 이름이라 파일마다 다를 수 있습니다.
 
