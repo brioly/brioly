@@ -119,26 +119,84 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-// KUBECONFIG in the environment is a source by itself; contexts need one.
-func TestKubeconfigFromEnvironment(t *testing.T) {
+// The Kubernetes source is sources.k8s with a kubeconfig path, relative to
+// brioly.yaml or to the home directory; contexts need one.
+func TestKubernetesSource(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	path := filepath.Join(dir, "brioly.yaml")
-	writeFile(t, path, "version: 1\nsources:\n  kubernetes:\n    contexts: [prod]\n")
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "needs a kubeconfig") {
+	writeFile(t, path, "version: 1\nsources:\n  k8s:\n    contexts: [prod]\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "sources.k8s.kubeconfig") {
 		t.Errorf("contexts without a kubeconfig: %v", err)
 	}
+	writeFile(t, path, "version: 1\nsources:\n  k8s:\n    kubeconfig: ./mine\n")
+	cfg, err := Load(path)
+	if err != nil || cfg.Sources.K8s.Kubeconfig != filepath.Join(dir, "mine") {
+		t.Fatalf("kubeconfig = %+v, err = %v", cfg.Sources.K8s, err)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("warnings = %v", cfg.Warnings)
+	}
+	writeFile(t, path, "version: 1\nsources:\n  k8s:\n    kubeconfig: ~/.kube/config:/etc/other\n")
+	if cfg, err = Load(path); err != nil || cfg.Sources.K8s.Kubeconfig != filepath.Join(home, ".kube", "config")+string(filepath.ListSeparator)+"/etc/other" {
+		t.Errorf("kubeconfig = %+v, err = %v", cfg.Sources.K8s, err)
+	}
+}
+
+// KUBECONFIG in the environment does not configure or turn on the source:
+// a run without sources.k8s.kubeconfig reads no cluster, and says why.
+func TestKubeconfigEnvironmentIsNotRead(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("KUBECONFIG", "/somewhere/config")
+	path := filepath.Join(dir, "brioly.yaml")
+	writeFile(t, path, "version: 1\nsources:\n  k8s:\n    contexts: [prod]\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "needs a kubeconfig") {
+		t.Errorf("contexts with only KUBECONFIG set: %v", err)
+	}
+	writeFile(t, path, "version: 1\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "no sources configured") {
+		t.Errorf("only KUBECONFIG set: %v", err)
+	}
+	writeFile(t, path, "version: 1\nsources:\n  repos:\n    - path: .\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if k := cfg.Sources.Kubernetes; k == nil || k.Kubeconfig != "/somewhere/config" || k.EKS {
-		t.Errorf("kubernetes source = %+v", cfg.Sources.Kubernetes)
+	if cfg.Sources.K8s != nil {
+		t.Errorf("kubernetes source = %+v, want none", cfg.Sources.K8s)
 	}
-	// A path in the file wins over the environment.
-	writeFile(t, path, "version: 1\nsources:\n  kubernetes:\n    kubeconfig: ./mine\n")
-	if cfg, err = Load(path); err != nil || cfg.Sources.Kubernetes.Kubeconfig != filepath.Join(dir, "mine") {
-		t.Errorf("kubeconfig = %+v, err = %v", cfg.Sources.Kubernetes, err)
+	if w := strings.Join(cfg.Warnings, "\n"); !strings.Contains(w, "KUBECONFIG") || !strings.Contains(w, "sources.k8s.kubeconfig") {
+		t.Errorf("warnings = %v", cfg.Warnings)
+	}
+	// Named in the file, the variable is not mentioned.
+	writeFile(t, path, "version: 1\nsources:\n  k8s:\n    kubeconfig: /mine\n")
+	if cfg, err = Load(path); err != nil || cfg.Sources.K8s.Kubeconfig != "/mine" || len(cfg.Warnings) != 0 {
+		t.Errorf("kubeconfig = %+v, warnings = %v, err = %v", cfg.Sources.K8s, cfg.Warnings, err)
+	}
+}
+
+// sources.kubernetes is the earlier name of sources.k8s: it still loads,
+// with a warning naming the new key; both at once is an error.
+func TestOldKubernetesKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(dir, "brioly.yaml")
+	writeFile(t, path, "version: 1\nsources:\n  kubernetes:\n    kubeconfig: ./mine\n    contexts: [prod]\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := cfg.Sources.K8s; k == nil || k.Kubeconfig != filepath.Join(dir, "mine") || len(k.Contexts) != 1 || cfg.Sources.OldKubernetes != nil {
+		t.Errorf("sources = %+v", cfg.Sources)
+	}
+	if w := strings.Join(cfg.Warnings, "\n"); !strings.Contains(w, "now called sources.k8s") {
+		t.Errorf("warnings = %v", cfg.Warnings)
+	}
+	writeFile(t, path, "version: 1\nsources:\n  kubernetes:\n    kubeconfig: ./a\n  k8s:\n    kubeconfig: ./b\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "both set") {
+		t.Errorf("both keys: %v", err)
 	}
 }
 

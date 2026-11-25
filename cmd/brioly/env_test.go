@@ -10,8 +10,8 @@ import (
 	"github.com/brioly/brioly/pkg/lifecycle"
 )
 
-// KUBECONFIG in the environment turns the Kubernetes source on. Tests must
-// not read whatever cluster the developer's shell points at.
+// KUBECONFIG in the environment is not read, but it adds a warning: tests
+// must not depend on whatever the developer's shell has set.
 func TestMain(m *testing.M) {
 	os.Unsetenv("KUBECONFIG")
 	// The end-of-support dates are read from a local server instead of

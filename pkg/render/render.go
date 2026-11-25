@@ -342,7 +342,7 @@ func writeClusterWorkloads(b *strings.Builder, g *graph, clusters []facts.Fact) 
 			case clusterRead(g, c):
 				fmt.Fprintf(b, "No workloads run in **%s** outside the system namespaces.\n\n", displayName(c))
 			default:
-				fmt.Fprintf(b, "The Kubernetes API of **%s** was not read: what runs in it is known only from manifests in the scanned repositories. Enable `sources.kubernetes` to read it.\n\n", displayName(c))
+				fmt.Fprintf(b, "The Kubernetes API of **%s** was not read: what runs in it is known only from manifests in the scanned repositories. Set `sources.k8s` in brioly.yaml to read it.\n\n", displayName(c))
 			}
 			continue
 		}

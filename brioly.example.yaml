@@ -42,15 +42,12 @@ sources:
   # docs/examples/kubernetes-readonly.yaml. Without this, what runs in a
   # cluster is known only from manifests in the repositories below.
   #
-  # Any cluster kubectl can reach (EKS, GKE, AKS, self-managed): run brioly
-  # with KUBECONFIG set, and the current context of that file is read with
-  # the credentials it names:
-  #
-  #   KUBECONFIG=~/.kube/config brioly generate
-  #
-  # Or configure it here. ~/.kube/config is never used on its own.
-  # kubernetes:
-  #   kubeconfig: ./kubeconfig         # instead of the KUBECONFIG variable
+  # Any cluster kubectl can reach (EKS, GKE, AKS, self-managed): name its
+  # kubeconfig file, and the current context of that file is read with the
+  # credentials it names. Only the file named here is read: neither the
+  # KUBECONFIG environment variable nor ~/.kube/config is used on its own.
+  # k8s:
+  #   kubeconfig: ~/.kube/config       # relative paths are relative to this file
   #   contexts: [prod, staging]        # default: the current context
   #   eks: true                        # also every EKS cluster the AWS scan finds, with the AWS identity (no kubeconfig needed)
   #   exclude_namespaces: [kube-system, kube-public, kube-node-lease]

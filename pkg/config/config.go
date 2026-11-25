@@ -68,9 +68,13 @@ type Labels struct {
 
 // Sources lists what to scan.
 type Sources struct {
-	AWS        *AWS        `yaml:"aws"`
-	Kubernetes *Kubernetes `yaml:"kubernetes"`
-	Repos      []Repo      `yaml:"repos"`
+	AWS *AWS `yaml:"aws"`
+	// K8s is the Kubernetes source (sources.k8s).
+	K8s   *Kubernetes `yaml:"k8s"`
+	Repos []Repo      `yaml:"repos"`
+	// OldKubernetes is the earlier spelling of sources.k8s. It still
+	// loads, with a warning, and is moved to K8s.
+	OldKubernetes *Kubernetes `yaml:"kubernetes"`
 }
 
 // Kubernetes selects the clusters whose API servers are read.
@@ -79,11 +83,13 @@ type Kubernetes struct {
 	// identity. The identity needs read access inside the cluster (see
 	// docs/examples/kubernetes-readonly.yaml).
 	EKS bool `yaml:"eks"`
-	// Kubeconfig is a kubeconfig file (or several, separated like
-	// $KUBECONFIG) whose contexts are read with the credentials it names:
-	// any cluster kubectl can reach, on any cloud or none. When it is empty
-	// the KUBECONFIG environment variable is used; ~/.kube/config is never
-	// picked up on its own.
+	// Kubeconfig is a kubeconfig file (or several, separated by ":" as
+	// in $KUBECONFIG) whose contexts are read with the credentials it
+	// names: any cluster kubectl can reach, on any cloud or none. A
+	// relative path is relative to brioly.yaml, and a leading ~/ is the
+	// home directory. The KUBECONFIG environment variable is not read, and
+	// ~/.kube/config is never picked up on its own: a cluster is read only
+	// when brioly.yaml names its kubeconfig here.
 	Kubeconfig string `yaml:"kubeconfig"`
 	// Contexts are the kubeconfig contexts to read; empty means the
 	// current context.
@@ -151,12 +157,36 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if err := cfg.renameOldKeys(); err != nil {
+		return nil, err
+	}
 	cfg.applyDefaults()
+	// The KUBECONFIG environment variable used to turn the Kubernetes
+	// source on by itself. It no longer does: say so once, so that a
+	// cluster the user expects to be read is not left out unnoticed.
+	if env := os.Getenv("KUBECONFIG"); env != "" && (cfg.Sources.K8s == nil || cfg.Sources.K8s.Kubeconfig == "") {
+		cfg.Warnings = append(cfg.Warnings,
+			"the KUBECONFIG environment variable is not read, so no cluster is read from it: to read a cluster, set sources.k8s.kubeconfig in brioly.yaml to the kubeconfig file")
+	}
 	if len(missing) > 0 {
 		cfg.Warnings = append(cfg.Warnings,
 			"unset variables in brioly.yaml: "+strings.Join(missing, ", "))
 	}
 	return cfg, cfg.validate()
+}
+
+// renameOldKeys moves settings written under an earlier key to the current
+// one, with a warning that names the new key.
+func (c *Config) renameOldKeys() error {
+	if old := c.Sources.OldKubernetes; old != nil {
+		if c.Sources.K8s != nil {
+			return errors.New("brioly.yaml: sources.kubernetes and sources.k8s are both set: sources.kubernetes is the earlier name of sources.k8s, so keep only sources.k8s")
+		}
+		c.Sources.K8s = old
+		c.Sources.OldKubernetes = nil
+		c.Warnings = append(c.Warnings, "sources.kubernetes in brioly.yaml is now called sources.k8s: rename the key (the settings under it stay the same)")
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults() {
@@ -174,14 +204,19 @@ func (c *Config) applyDefaults() {
 			c.Warnings = append(c.Warnings, "\""+ignored.key+"\" in brioly.yaml is ignored: the CLI no longer writes documents with a model. Remove it.")
 		}
 	}
-	// Paths written in brioly.yaml are relative to it (a path from the
-	// KUBECONFIG environment variable is added later and left as it is).
-	if k := c.Sources.Kubernetes; k != nil && k.Kubeconfig != "" {
+	// Paths written in brioly.yaml are relative to it; ~/ is the home
+	// directory, as in a shell.
+	if k := c.Sources.K8s; k != nil && k.Kubeconfig != "" {
+		home, _ := os.UserHomeDir()
 		parts := filepath.SplitList(k.Kubeconfig)
 		for i, p := range parts {
-			if p != "" && !filepath.IsAbs(p) {
-				parts[i] = filepath.Join(c.Dir, p)
+			if home != "" && (p == "~" || strings.HasPrefix(p, "~/")) {
+				p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 			}
+			if p != "" && !filepath.IsAbs(p) {
+				p = filepath.Join(c.Dir, p)
+			}
+			parts[i] = p
 		}
 		k.Kubeconfig = strings.Join(parts, string(filepath.ListSeparator))
 	}
@@ -205,25 +240,18 @@ func (c *Config) validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported brioly.yaml version %d", c.Version)
 	}
-	// KUBECONFIG in the environment turns the Kubernetes source on.
-	if env := os.Getenv("KUBECONFIG"); env != "" && (c.Sources.Kubernetes == nil || c.Sources.Kubernetes.Kubeconfig == "") {
-		if c.Sources.Kubernetes == nil {
-			c.Sources.Kubernetes = &Kubernetes{}
-		}
-		c.Sources.Kubernetes.Kubeconfig = env
-	}
-	k := c.Sources.Kubernetes
+	k := c.Sources.K8s
 	if k != nil && len(k.Contexts) > 0 && k.Kubeconfig == "" {
-		return errors.New("brioly.yaml: sources.kubernetes.contexts needs a kubeconfig: set sources.kubernetes.kubeconfig or the KUBECONFIG environment variable")
+		return errors.New("brioly.yaml: sources.k8s.contexts needs a kubeconfig: set sources.k8s.kubeconfig to the kubeconfig file")
 	}
 	if c.Sources.AWS == nil && len(c.Sources.Repos) == 0 && (k == nil || k.Kubeconfig == "") {
-		return errors.New("brioly.yaml: no sources configured (sources.aws, sources.repos, or a kubeconfig for sources.kubernetes)")
+		return errors.New("brioly.yaml: no sources configured (sources.aws, sources.repos, or sources.k8s.kubeconfig)")
 	}
 	if c.Sources.AWS != nil && len(c.Sources.AWS.Regions) == 0 {
 		return errors.New("brioly.yaml: sources.aws.regions must list at least one region")
 	}
-	if k := c.Sources.Kubernetes; k != nil && k.EKS && c.Sources.AWS == nil {
-		return errors.New("brioly.yaml: sources.kubernetes.eks needs sources.aws: clusters are found by the AWS scan")
+	if k != nil && k.EKS && c.Sources.AWS == nil {
+		return errors.New("brioly.yaml: sources.k8s.eks needs sources.aws: clusters are found by the AWS scan")
 	}
 	for _, r := range c.Sources.Repos {
 		if r.Path == "" {
