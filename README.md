@@ -22,7 +22,10 @@ Commit the whole directory. `facts.json` is also what the next run falls back on
 ## Quick start
 
 ```sh
-go install github.com/brioly/brioly/cmd/brioly@latest   # module path is provisional
+curl -sSL https://brioly.io/install.sh | sh   # Linux and macOS; checks the download against the release's checksums
+# or: go install github.com/brioly/brioly/cmd/brioly@latest
+# or: download an archive from https://github.com/brioly/brioly/releases (Windows too)
+
 cp brioly.example.yaml brioly.yaml   # edit sources
 brioly generate --no-llm             # deterministic documents, no API key needed
 brioly generate                      # adds the onboarding guide and JD source text (needs llm.api_key)
