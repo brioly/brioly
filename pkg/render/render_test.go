@@ -148,7 +148,7 @@ func TestWriteIsDeterministic(t *testing.T) {
 	s := testSnapshot(t)
 	read := func() map[string]string {
 		dir := t.TempDir()
-		if err := Write(dir, s); err != nil {
+		if err := Write(dir, s, testDates); err != nil {
 			t.Fatal(err)
 		}
 		out := map[string]string{}
@@ -162,7 +162,7 @@ func TestWriteIsDeterministic(t *testing.T) {
 		return out
 	}
 	// Files is the same output without a directory.
-	mem, err := Files(s)
+	mem, err := Files(s, testDates)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,7 +12,34 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/brioly/brioly/pkg/lifecycle"
 )
+
+// Without the table of dates generate stops before it scans anything, and
+// says which address failed and why.
+func TestGenerateStopsWithoutTheDates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gone := httptest.NewServer(http.NotFoundHandler())
+	t.Setenv(lifecycle.URLEnv, gone.URL)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "brioly.yaml")
+	if err := os.WriteFile(cfg, []byte("sources:\n  repos:\n    - path: .\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := run(context.Background(), []string{"generate", "-c", cfg}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), gone.URL+" answered 404") || !strings.Contains(err.Error(), lifecycle.URLEnv) {
+		t.Fatalf("a missing table: %v", err)
+	}
+	gone.Close()
+	err = run(context.Background(), []string{"generate", "-c", cfg}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "could not be reached") {
+		t.Fatalf("an unreachable address: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "brioly-docs")); statErr == nil {
+		t.Error("documents were written without the dates")
+	}
+}
 
 func TestGenerateEndToEnd(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -40,6 +67,11 @@ func TestGenerateEndToEnd(t *testing.T) {
 	tech, err := os.ReadFile(filepath.Join(dir, "brioly-docs", "tech-stack.md"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The base image's version is rated with the dates that were fetched.
+	support, err := os.ReadFile(filepath.Join(dir, "brioly-docs", "version-support.md"))
+	if err != nil || !strings.Contains(string(support), "| Base image | Dockerfile | `node:22` | 2031-04-30 |") || !strings.Contains(string(support), "as of 2030-01-01") {
+		t.Errorf("version-support.md (%v):\n%s", err, support)
 	}
 	for _, want := range []string{"## Repository app", "Next.js", "runs on `node`, exposes 3000"} {
 		if !strings.Contains(string(tech), want) {

@@ -1,17 +1,20 @@
 #!/bin/sh
-# Refreshes pkg/lifecycle/data.json: when each version of the products brioly
-# recognises stops being supported. The dates come from endoflife.date, a
-# public, MIT-licensed collection (https://endoflife.date). Nothing about
+# Builds the table of end-of-support dates that brioly.io serves at
+# https://brioly.io/lifecycle/v1/data.json, which the brioly CLI and brioly
+# Cloud read to write version-support.md. The dates come from endoflife.date,
+# a public, MIT-licensed collection (https://endoflife.date). Nothing about
 # the caller is sent: these are plain GETs of public files.
 #
-# brioly never fetches these dates while it runs. They are part of the
-# binary, so the same scan gives the same document everywhere, online or
-# not; run this script and commit the result to bring them up to date.
+#   scripts/update-lifecycle.sh OUTPUT.json
+#
+# The table is not part of the brioly binary. Whoever serves it runs this
+# and publishes the result; a mirror inside a closed network does the same
+# and points brioly at it with BRIOLY_LIFECYCLE_URL.
 #
 # Needs curl and jq.
 set -eu
 
-out="$(dirname "$0")/../pkg/lifecycle/data.json"
+out="${1:?usage: update-lifecycle.sh OUTPUT.json}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 

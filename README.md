@@ -26,7 +26,7 @@ curl -sSL https://brioly.io/install.sh | sh   # Linux and macOS; checks the down
 # or: download an archive from https://github.com/brioly/brioly/releases (Windows too)
 
 cp brioly.example.yaml brioly.yaml   # edit sources
-brioly generate                      # scan and write the documents; no API key, no model
+brioly generate                      # scan and write the documents; no API key, no model (reads a table of dates from brioly.io)
 
 brioly sync --dry-run                # scan and report how much would be sent to brioly Cloud
 brioly sync                          # send the facts to a brioly Cloud workspace (needs cloud.token)
@@ -53,9 +53,9 @@ brioly diff old/facts.json new/facts.json   # what changed, rated by fixed rules
 
 ## What leaves your machine
 
-- `brioly generate`: nothing leaves your machine. brioly talks to AWS and to your clusters, reads your local repositories, and writes files. It never calls an AI model.
+- `brioly generate`: nothing about your system leaves your machine. brioly talks to AWS and to your clusters, reads your local repositories, and writes files. It never calls an AI model. It makes one request of its own: a GET of the table of end-of-support dates from `https://brioly.io/lifecycle/v1/data.json` (or the address in `BRIOLY_LIFECYCLE_URL`). That request carries no data; like any request it shows the server your IP address.
 - `brioly sync`: the collected facts are sent to your brioly Cloud workspace, after masking, over HTTPS with a sync token you create there. The same facts as `facts.json`: resource names, configuration values, relationships, dependency names, file paths and environment variable **names**. Source code, environment variable values and what you wrote in `components.yaml` are never sent, and nothing is sent to a model. Each send replaces the previous one. `--dry-run` scans and sends nothing.
-- `brioly generate` sends nothing to brioly or to anyone else.
+- Nothing brioly collected is sent anywhere by `brioly generate`.
 
 ## Your knowledge stays yours
 
@@ -67,7 +67,7 @@ Every attribute is either structural (a database became public, a runtime change
 
 ## Version support and exposure
 
-`version-support.md` lists the versions you run on (EKS and Kubernetes, RDS and Aurora engines, Lambda runtimes, the base images of your Dockerfiles, a few frameworks) with the day their standard support ends, soonest first. The dates are a table inside the binary, taken from [endoflife.date](https://endoflife.date) and refreshed with `scripts/update-lifecycle.sh`; brioly fetches nothing while it runs, and a version that is not in the table is listed as not known.
+`version-support.md` lists the versions you run on (EKS and Kubernetes, RDS and Aurora engines, Lambda runtimes, the base images of your Dockerfiles, a few frameworks) with the day their standard support ends, soonest first. The dates are a table that brioly.io serves (built from [endoflife.date](https://endoflife.date) with `scripts/update-lifecycle.sh`), so that a new date reaches you without a new release. `brioly generate` reads it at the start of every run; if it cannot, it stops and says why. A version that is not in the table is listed as not known. Inside a network that cannot reach brioly.io, serve a copy of the table and set `BRIOLY_LIFECYCLE_URL` to its address.
 
 `internet-exposure.md` lists what the internet can reach and the settings that widen or weaken that: security groups open to `0.0.0.0/0` (rated by which ports), databases with a public address or without encryption, public cluster endpoints. Every finding comes from a fixed rule that the document states, and it ends with what the review does not cover. It is a review of configuration, not a security audit.
 

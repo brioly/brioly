@@ -29,6 +29,7 @@ import (
 	"github.com/brioly/brioly/pkg/config"
 	"github.com/brioly/brioly/pkg/diff"
 	"github.com/brioly/brioly/pkg/facts"
+	"github.com/brioly/brioly/pkg/lifecycle"
 	"github.com/brioly/brioly/pkg/render"
 	"github.com/brioly/brioly/pkg/scan"
 )
@@ -112,12 +113,21 @@ func generate(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		cfg.Output, _ = filepath.Abs(*outDir)
 	}
 
+	// The dates version-support.md is made from are read from brioly.io
+	// before anything is scanned: without them the documents would be
+	// incomplete, so the run stops here and says why. The request carries
+	// nothing about what is about to be scanned.
+	dates, err := lifecycle.Fetch(ctx, lifecycle.URL())
+	if err != nil {
+		return fmt.Errorf("%w\nbrioly generate needs this table to write version-support.md. Check the connection to the address above, or set %s to the address of a copy this machine can reach", err, lifecycle.URLEnv)
+	}
+
 	snap, err := snapshot(ctx, cfg, stderr)
 	if err != nil {
 		return err
 	}
 
-	if err := render.Write(cfg.Output, snap); err != nil {
+	if err := render.Write(cfg.Output, snap, dates); err != nil {
 		return err
 	}
 	if *history != "" {

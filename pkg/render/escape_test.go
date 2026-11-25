@@ -195,7 +195,7 @@ func TestHostileValuesStayText(t *testing.T) {
 				Attributes: map[string]any{"cidr_block": "10.9.0.0/16"}, Source: facts.Source{Connector: "aws", Scope: "111122223333", Region: "eu-west-1"}})
 			poison(snap, text)
 			snap.Facts[len(snap.Facts)-1].Name = ""
-			files, err := Files(snap)
+			files, err := Files(snap, testDates)
 			if err != nil {
 				t.Fatal(err)
 			}
