@@ -115,21 +115,29 @@ func footnoteLabel(id string) string {
 func WriteDocuments(dir string, s *facts.Snapshot, docs []Document, producer string) (int, error) {
 	total := 0
 	for _, d := range docs {
-		text, unknown := ResolveCitations(d.Markdown, s, d.Published)
+		text, unknown := Written(s, d, producer)
 		total += unknown
-		header := fmt.Sprintf("> Written by %s from collected facts. Each statement cites its source; inferences are marked as such.", producer)
-		if unknown > 0 {
-			header += fmt.Sprintf(" %d statement(s) cite sources that do not exist and are marked unverified.", unknown)
-		}
 		p := filepath.Join(dir, d.Path)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return total, err
 		}
-		if err := os.WriteFile(p, []byte(header+"\n\n"+strings.TrimSpace(text)+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
 			return total, err
 		}
 	}
 	return total, nil
+}
+
+// Written returns a model-written document as it is published: its
+// citations resolved against s, under a line that says who wrote it. The
+// second result is the number of citations that name nothing in s.
+func Written(s *facts.Snapshot, d Document, producer string) (string, int) {
+	text, unknown := ResolveCitations(d.Markdown, s, d.Published)
+	header := fmt.Sprintf("> Written by %s from collected facts. Each statement cites its source; inferences are marked as such.", producer)
+	if unknown > 0 {
+		header += fmt.Sprintf(" %d statement(s) cite sources that do not exist and are marked unverified.", unknown)
+	}
+	return header + "\n\n" + strings.TrimSpace(text) + "\n", unknown
 }
 
 var nonSlug = regexp.MustCompile(`[^\p{L}\p{N}]+`)

@@ -310,7 +310,7 @@ func TestDiagramDrawsWorkloadsInsideTheirCluster(t *testing.T) {
 	lb, cluster, web := nodeID("aws:lb"), nodeID("aws:cluster"), nodeID("aws:web")
 
 	d := build(true)
-	box := "    subgraph " + cluster + "[\"cluster · EKS 1.37\"]\n      " + web + "[\"web<br/><small>Kubernetes Deployment</small>\"]\n    end\n"
+	box := "    subgraph " + cluster + "[\"cluster · EKS 1.37\"]\n      " + web + "[\"web<br/><small>Deployment</small>\"]\n    end\n"
 	if !strings.Contains(d, box) {
 		t.Errorf("the workload is not drawn inside its cluster:\n%s", d)
 	}
