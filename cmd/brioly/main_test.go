@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func TestGenerateNoLLMEndToEnd(t *testing.T) {
+func TestGenerateEndToEnd(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "app")
@@ -51,7 +51,10 @@ func TestGenerateNoLLMEndToEnd(t *testing.T) {
 	}
 }
 
-func TestGenerateRequiresKeyUnlessNoLLM(t *testing.T) {
+// The CLI never calls a model: a configuration that still has the model
+// settings of an earlier version runs without a key, says they are ignored,
+// and writes no model-written documents. The old flag is accepted.
+func TestGenerateNeverNeedsAModel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	dir := t.TempDir()
@@ -59,9 +62,19 @@ func TestGenerateRequiresKeyUnlessNoLLM(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte("llm:\n  api_key: ${ANTHROPIC_API_KEY}\nsources:\n  repos:\n    - path: .\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := run(context.Background(), []string{"generate", "-c", cfg}, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "--no-llm") {
-		t.Fatalf("expected a missing-key error that mentions --no-llm, got %v", err)
+	for _, args := range [][]string{{"generate", "-c", cfg}, {"generate", "-c", cfg, "--no-llm"}} {
+		var stderr bytes.Buffer
+		if err := run(context.Background(), args, &bytes.Buffer{}, &stderr); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), `"llm" in brioly.yaml is ignored`) {
+			t.Errorf("%v: no warning about the ignored setting:\n%s", args, stderr.String())
+		}
+	}
+	for _, name := range []string{"onboarding.md", "written.json", "jd"} {
+		if _, err := os.Stat(filepath.Join(dir, "brioly-docs", name)); err == nil {
+			t.Errorf("%s was written", name)
+		}
 	}
 }
 
@@ -112,7 +125,7 @@ func TestComponentsDiffAndReplayEndToEnd(t *testing.T) {
 	}
 	cli("generate", "-c", cfg, "--no-llm", "--history", hist)
 	arch, _ := os.ReadFile(filepath.Join(dir, "brioly-docs", "architecture.md"))
-	for _, want := range []string{"| Web app | code_only | web-team |", "- **Web app**: Deployed by hand on Fridays."} {
+	for _, want := range []string{"| Web app | code_only | app,", "- **Web app**: Deployed by hand on Fridays."} {
 		if !strings.Contains(string(arch), want) {
 			t.Errorf("architecture.md lacks %q:\n%s", want, arch)
 		}

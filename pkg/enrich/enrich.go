@@ -1,4 +1,8 @@
-// Package enrich is the only place brioly uses an LLM. Components are found
+// Package enrich is the only place a model is used, and the brioly CLI does
+// not use it: the CLI is deterministic from end to end. The package is here
+// for programs built on this module (brioly Cloud writes its onboarding
+// guide and job description source text with it).
+// Components are found
 // by rules (package components); here the model describes each component,
 // writes a system overview and drafts job description source text.
 //

@@ -4,7 +4,7 @@
 
 ## 프로젝트
 
-**brioly**는 회사의 인프라(AWS 등)와 코드(GitHub)를 스캔해서 아키텍처·기술 스택 현황 문서, 온보딩 문서, JD 소스 텍스트를 자동 생성하고, 주기적으로 최신 상태로 유지합니다.
+**brioly**는 회사의 인프라(AWS 등)와 코드(GitHub)를 스캔해서 아키텍처·기술 스택 현황 문서를 자동 생성하고, 주기적으로 최신 상태로 유지합니다. 온보딩 문서와 JD 소스 텍스트처럼 모델이 쓰는 문서는 brioly Cloud가 만듭니다.
 
 - **현재 상태**: 초기 개발 단계. Go 모듈 `github.com/brioly/brioly`에 `brioly generate`, `diff`, `replay`, `components init`이 있습니다.
 - **데이터 모델**: [`docs/design/fact-schema-v0.md`](docs/design/fact-schema-v0.md)(수집 규칙, ID, coverage, secret 규칙)와 [`docs/design/fact-schema-v1.md`](docs/design/fact-schema-v1.md)(속성 등급, 컴포넌트, 주석, 변경 이벤트. 코드에 구현됨).
@@ -14,10 +14,11 @@
 
 아래 원칙을 어기는 코드를 작성하지 마세요. 바꿔야 한다고 판단되면 먼저 제안하고 합의합니다.
 
-1. **수집은 결정적 코드로, LLM은 해석과 서술에만 씁니다.**
+1. **수집은 결정적 코드로, LLM은 해석과 서술에만 씁니다. CLI는 처음부터 끝까지 결정적입니다.**
+   - **CLI(`cmd/brioly`)는 모델을 부르지 않습니다**(2026-11-26 결정). API 키 설정도, 모델이 쓰는 출력도 없습니다. `brioly.yaml`의 예전 `llm`·`docs` 항목은 경고와 함께 무시합니다. 모델을 쓰는 코드는 `pkg/enrich`에만 있고, 이 모듈을 가져다 쓰는 brioly Cloud가 부릅니다.
    - 스캔은 SDK와 API 호출로 빠짐없이, 같은 입력이면 같은 출력이 나오게 수집합니다.
    - 스캔 단계에서 MCP나 LLM 에이전트를 쓰지 않습니다.
-2. **OSS CLI는 문서 생성과 두 스냅샷의 diff까지 온전히 합니다.** 스캔 범위(계정·레포 수)로 기능을 막지 않습니다. 사실 이력 보관, 알림, 팀 기능은 brioly Cloud의 몫입니다.
+2. **OSS CLI는 결정적 문서(아키텍처, 기술 스택, 다이어그램) 생성과 두 스냅샷의 diff까지 온전히 합니다.** 스캔 범위(계정·레포 수)로 기능을 막지 않습니다. 사실 이력 보관, 알림, 팀 기능은 brioly Cloud의 몫입니다.
 3. **전체 재스캔, 부분 재작성.**
    - LLM 호출은 컴포넌트 단위로 나누고, 멤버의 structural 해시가 바뀐 컴포넌트만 다시 씁니다.
    - 속성은 `structural` / `detail` / `volatile` 3등급입니다. 서술문에는 structural만, 표의 칸에는 detail까지 씁니다.
@@ -43,7 +44,7 @@
   - AWS: IAM Role + tenant별 External ID (구성 정보만 읽고 데이터는 읽지 않는 정책. `ReadOnlyAccess`는 쓰지 않음)
   - GitHub: GitHub App
   - 그 밖의 SaaS: OAuth 우선, 지원하지 않으면 API key를 KMS 봉투 암호화로 저장하고 쓰기 전용으로 둠
-- **로컬 모드(`generate`, `sync`)는 키를 써도 됩니다.**
+- **로컬 모드(`generate`, `sync`)는 키를 써도 됩니다**(AWS 자격 증명, Cloud sync 토큰. 모델 키는 쓰지 않습니다).
   - `brioly.yaml`에는 참조(`${ENV_VAR}`)만 적습니다.
   - AWS는 표준 자격 증명 체인을 씁니다.
 - **코드 원문 처리 규칙**
@@ -77,7 +78,7 @@
 ### AI가 쓰는 문서의 규칙: `pkg/enrich/guide.md`
 
 - 온보딩 문서와 JD처럼 LLM이 쓰는 문서에 대해 **정한 판단은 모두 [`pkg/enrich/guide.md`](pkg/enrich/guide.md)에 적습니다.** 이 파일은 바이너리에 포함되어 모든 요청의 시스템 프롬프트로 전달됩니다. 대화에서 정한 글쓰기 규칙(무엇을 쓰고 빼는지, 문서별 역할, 어조)을 Go 코드의 프롬프트 문자열에만 넣지 마세요. 코드의 프롬프트에는 출력 필드 설명처럼 스키마에 묶인 내용만 둡니다.
-- **전체를 다시 쓰지 않고 최소한의 diff로 고칩니다.** 실행할 때마다 모델의 답을 출력 디렉터리의 `written.json`에 저장하고(문서와 함께 커밋), 다음 실행에서 입력이 같은 단위는 호출 없이 그대로 쓰고, 입력이 바뀐 단위는 이전 답을 함께 주어 바뀐 사실만 반영하게 합니다. 규칙은 가이드의 "Revising" 절에 있습니다.
+- **전체를 다시 쓰지 않고 최소한의 diff로 고칩니다.** 쓸 때마다 모델의 답(`enrich.State`)을 호출한 쪽이 저장해 두고(Cloud는 DB에), 다음 실행에서 입력이 같은 단위는 호출 없이 그대로 쓰고, 입력이 바뀐 단위는 이전 답을 함께 주어 바뀐 사실만 반영하게 합니다. 규칙은 가이드의 "Revising" 절에 있습니다.
 - 가이드를 고치면 모든 단위가 다시 호출되지만, 이전 답을 받은 수정이므로 문서가 통째로 바뀌지는 않습니다.
 - 각주 라벨은 인용한 ID에서 만듭니다(번호가 밀려 diff가 커지는 것을 막기 위함).
 
@@ -92,7 +93,7 @@
 
 | 경로 | 역할 |
 |---|---|
-| `cmd/brioly` | CLI (`generate`, `sync`, `components init`, `diff`, `replay`, `version`). 설정을 읽어 `pkg/scan`을 부르고 결과를 파일로 씀 |
+| `cmd/brioly` | CLI (`generate`, `sync`, `components init`, `diff`, `replay`, `version`). 설정을 읽어 `pkg/scan`을 부르고 결과를 파일로 씀. 모델을 부르지 않음(`pkg/enrich`를 import하지 않음) |
 | `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. `scan.Clean`(밖에서 온 스냅샷을 다시 마스킹·재계산)과 `scan.Combine`(두 스냅샷을 하나로, 겹치면 앞의 것 우선)도 여기 있음. AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role) |
 | `pkg/facts` | Fact·Edge·Component·Snapshot, kind 레지스트리(`kinds.go`: 속성 등급), 결정적 ID, structural·detail 해시, `Finalize` |
 | `pkg/components` | 앵커 기반 컴포넌트 묶기(규칙), `components.yaml` 레지스트리 |
@@ -102,7 +103,7 @@
 | `pkg/collect/aws` | AWS 수집기. 서비스별 좁은 인터페이스로 fake 테스트 가능. 찾은 EKS 클러스터와 엔드포인트(호스트 → 사실)를 다음 수집기에 넘김 |
 | `pkg/collect/kube` | Kubernetes 수집기(선택). 클러스터 API에서 워크로드·Service·Ingress만 GET으로 읽음. Secret·ConfigMap·파드는 읽지 않음. 의존성 없는 HTTP 클라이언트, 테스트는 가짜 API 서버 |
 | `pkg/redact` | gitleaks 기반 secret 마스킹 |
-| `pkg/enrich` | 유일한 LLM 사용처: 컴포넌트별 설명, 개요, JD 초안. 글쓰기 규칙은 `guide.md`, 이전 답(`written.json`)을 받아 바뀐 부분만 수정, 온보딩 문서는 코드로 조립 |
+| `pkg/enrich` | 유일한 LLM 사용처. CLI는 쓰지 않고 brioly Cloud가 씀: 컴포넌트별 설명, 개요, JD 초안. 글쓰기 규칙은 `guide.md`, 이전 답(`State`)을 받아 바뀐 부분만 수정, 온보딩 문서는 코드로 조립. 한 종류만 쓰는 옵션(`NoOnboarding`, `NoJobDescriptions`) |
 | `pkg/render` | 결정적 문서와 다이어그램, `[[fact-id]]` 인용 해석 |
 
 - 새 kind나 속성을 추가하면 `pkg/facts/kinds.go`에 등급을 선언합니다. 선언하지 않은 속성은 버려지고, 수집기 테스트의 `facts.Undeclared` 검사에서 걸립니다. 분류나 정규화를 바꾸면 `RegistryVersion`을 올립니다.

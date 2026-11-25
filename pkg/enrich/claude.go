@@ -2,13 +2,9 @@ package enrich
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go/v2"
@@ -103,48 +99,4 @@ func finalText(content []anthropic.BetaContentBlockUnion) string {
 		}
 	}
 	return text.String()
-}
-
-// Cached wraps a Model with a file cache keyed by the full request, so
-// re-running generate on an unchanged environment costs nothing and returns
-// the same documents.
-type Cached struct {
-	Inner Model
-	Dir   string
-}
-
-// Name implements Model.
-func (c Cached) Name() string { return c.Inner.Name() }
-
-// JSON implements Model.
-func (c Cached) JSON(ctx context.Context, req Request) ([]byte, error) {
-	h := sha256.New()
-	for _, part := range []string{PromptVersion, c.Inner.Name(), req.System, req.Context, req.Prompt, string(req.Schema)} {
-		h.Write([]byte(part))
-		h.Write([]byte{0})
-	}
-	path := filepath.Join(c.Dir, hex.EncodeToString(h.Sum(nil))+".json")
-	if b, err := os.ReadFile(path); err == nil && json.Valid(b) {
-		return b, nil
-	}
-	b, err := c.Inner.JSON(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if !json.Valid(b) {
-		return nil, errors.New("model returned invalid JSON")
-	}
-	// Write to a temporary file and rename, so an interrupted run never
-	// leaves a truncated entry behind.
-	if err := os.MkdirAll(c.Dir, 0o700); err == nil {
-		if tmp, err := os.CreateTemp(c.Dir, ".tmp-*"); err == nil {
-			_, werr := tmp.Write(b)
-			cerr := tmp.Close()
-			if werr == nil && cerr == nil {
-				_ = os.Rename(tmp.Name(), path)
-			}
-			_ = os.Remove(tmp.Name())
-		}
-	}
-	return b, nil
 }

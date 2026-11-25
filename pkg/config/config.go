@@ -20,16 +20,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DefaultModel is the Claude model used for the enrich and render steps.
-const DefaultModel = "claude-opus-5-5"
-
 // Config is the parsed brioly.yaml.
 type Config struct {
-	Version int     `yaml:"version"`
-	Output  string  `yaml:"output"`
-	LLM     LLM     `yaml:"llm"`
-	Docs    Docs    `yaml:"docs"`
-	Sources Sources `yaml:"sources"`
+	Version int    `yaml:"version"`
+	Output  string `yaml:"output"`
+	// LLM and Docs configured documents written by a model, which the
+	// CLI no longer does. The keys are still read, and ignored with a
+	// warning, so that a brioly.yaml written for an earlier version loads.
+	LLM     yaml.Node `yaml:"llm"`
+	Docs    yaml.Node `yaml:"docs"`
+	Sources Sources   `yaml:"sources"`
 	// Cloud is where brioly sync sends facts. Optional.
 	Cloud Cloud `yaml:"cloud"`
 	// Components is the path of the components file (names, owners, merges
@@ -45,7 +45,6 @@ type Config struct {
 	Warnings []string `yaml:"-"`
 }
 
-// LLM configures the bring-your-own-key model access.
 // Cloud says where brioly sync sends what it collected.
 type Cloud struct {
 	// URL is the address of brioly Cloud's sync endpoint; empty means
@@ -59,27 +58,12 @@ type Cloud struct {
 // DefaultCloudURL is brioly Cloud's sync endpoint.
 const DefaultCloudURL = "https://app.brioly.io/sync"
 
-type LLM struct {
-	APIKey string `yaml:"api_key"`
-	Model  string `yaml:"model"`
-}
-
 // Labels configures which resource tags count as structural.
 type Labels struct {
 	// Allow lists the tag keys (case-insensitive) kept as labels. Changes to
 	// other tags are details and never raise a change event. Default:
 	// env, environment, team, owner, service, app, project.
 	Allow []string `yaml:"allow"`
-}
-
-// Docs configures the LLM-written documents.
-type Docs struct {
-	// Language of the written documents, as a language name or BCP 47 tag
-	// ("English", "ko"). Default: English.
-	Language string `yaml:"language"`
-	// JDRoles are the roles to draft job description source text for. When
-	// empty, brioly suggests up to three roles that fit the stack.
-	JDRoles []string `yaml:"jd_roles"`
 }
 
 // Sources lists what to scan.
@@ -182,11 +166,13 @@ func (c *Config) applyDefaults() {
 	if c.Output == "" {
 		c.Output = "brioly-docs"
 	}
-	if c.LLM.Model == "" {
-		c.LLM.Model = DefaultModel
-	}
-	if c.Docs.Language == "" {
-		c.Docs.Language = "English"
+	for _, ignored := range []struct {
+		key  string
+		node yaml.Node
+	}{{"llm", c.LLM}, {"docs", c.Docs}} {
+		if ignored.node.Kind != 0 {
+			c.Warnings = append(c.Warnings, "\""+ignored.key+"\" in brioly.yaml is ignored: the CLI no longer writes documents with a model. Remove it.")
+		}
 	}
 	// Paths written in brioly.yaml are relative to it (a path from the
 	// KUBECONFIG environment variable is added later and left as it is).
