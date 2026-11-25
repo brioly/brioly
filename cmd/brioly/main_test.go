@@ -33,7 +33,7 @@ func TestGenerateEndToEnd(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := run(context.Background(), []string{"generate", "-c", filepath.Join(dir, "brioly.yaml"), "--no-llm"}, &stdout, &stderr)
+	err := run(context.Background(), []string{"generate", "-c", filepath.Join(dir, "brioly.yaml")}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("generate failed: %v\n%s", err, stderr.String())
 	}
@@ -53,7 +53,8 @@ func TestGenerateEndToEnd(t *testing.T) {
 
 // The CLI never calls a model: a configuration that still has the model
 // settings of an earlier version runs without a key, says they are ignored,
-// and writes no model-written documents. The old flag is accepted.
+// and writes no model-written documents. The flag that used to turn the
+// model off is gone with it.
 func TestGenerateNeverNeedsAModel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("ANTHROPIC_API_KEY", "")
@@ -62,19 +63,20 @@ func TestGenerateNeverNeedsAModel(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte("llm:\n  api_key: ${ANTHROPIC_API_KEY}\nsources:\n  repos:\n    - path: .\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"generate", "-c", cfg}, {"generate", "-c", cfg, "--no-llm"}} {
-		var stderr bytes.Buffer
-		if err := run(context.Background(), args, &bytes.Buffer{}, &stderr); err != nil {
-			t.Fatalf("%v: %v\n%s", args, err, stderr.String())
-		}
-		if !strings.Contains(stderr.String(), `"llm" in brioly.yaml is ignored`) {
-			t.Errorf("%v: no warning about the ignored setting:\n%s", args, stderr.String())
-		}
+	var stderr bytes.Buffer
+	if err := run(context.Background(), []string{"generate", "-c", cfg}, &bytes.Buffer{}, &stderr); err != nil {
+		t.Fatalf("generate: %v\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"llm" in brioly.yaml is ignored`) {
+		t.Errorf("no warning about the ignored setting:\n%s", stderr.String())
 	}
 	for _, name := range []string{"onboarding.md", "written.json", "jd"} {
 		if _, err := os.Stat(filepath.Join(dir, "brioly-docs", name)); err == nil {
 			t.Errorf("%s was written", name)
 		}
+	}
+	if err := run(context.Background(), []string{"generate", "-c", cfg, "--no-llm"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Error("--no-llm was accepted")
 	}
 }
 
@@ -123,7 +125,7 @@ func TestComponentsDiffAndReplayEndToEnd(t *testing.T) {
 	if err := os.WriteFile(regPath, []byte(edited), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cli("generate", "-c", cfg, "--no-llm", "--history", hist)
+	cli("generate", "-c", cfg, "--history", hist)
 	arch, _ := os.ReadFile(filepath.Join(dir, "brioly-docs", "architecture.md"))
 	for _, want := range []string{"| Web app | code_only | app,", "- **Web app**: Deployed by hand on Fridays."} {
 		if !strings.Contains(string(arch), want) {
@@ -139,7 +141,7 @@ func TestComponentsDiffAndReplayEndToEnd(t *testing.T) {
 	// A patch bump is a detail; a major bump and a new exposed port are structural.
 	write("app/package.json", `{"dependencies": {"next": "15.0.3"}}`)
 	time.Sleep(1100 * time.Millisecond) // history files are named by the second
-	cli("generate", "-c", cfg, "--no-llm", "--history", hist)
+	cli("generate", "-c", cfg, "--history", hist)
 	second := filepath.Join(dir, "brioly-docs", "facts.json")
 	if out := cli("diff", first, second); !strings.Contains(out, "0 high, 0 medium, 0 low, 1 info") {
 		t.Errorf("patch bump diff:\n%s", out)
@@ -151,7 +153,7 @@ func TestComponentsDiffAndReplayEndToEnd(t *testing.T) {
 	write("app/package.json", `{"dependencies": {"next": "16.0.0"}}`)
 	write("app/Dockerfile", "FROM node:22-alpine\nEXPOSE 3000 9229\n")
 	time.Sleep(1100 * time.Millisecond)
-	cli("generate", "-c", cfg, "--no-llm", "--history", hist)
+	cli("generate", "-c", cfg, "--history", hist)
 	out := cli("diff", first, second)
 	for _, want := range []string{"major: `15` → `16`", "exposed_ports", "annotation stale"} {
 		if !strings.Contains(out, want) {
