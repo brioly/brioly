@@ -221,7 +221,7 @@ func contains(list []string, v string) bool {
 // number, which change on every commit while the fact stays the same.
 // facts.json keeps the precise location.
 func evidence(f facts.Fact) string {
-	return "`" + f.Ref.Value + "`"
+	return code(f.Ref.Value)
 }
 
 // nodeID returns a stable Mermaid node ID for a fact.
@@ -283,5 +283,17 @@ func displayName(f facts.Fact) string {
 
 // mdEscape keeps table cells on one line and escapes pipes.
 func mdEscape(s string) string {
-	return strings.NewReplacer("|", `\|`, "\n", " ").Replace(s)
+	// For text that is not from the escaped copy (a summary written by a
+	// model): it keeps its Markdown, but cannot end a table cell or a line.
+	var b strings.Builder
+	for i, c := range s {
+		switch {
+		case c == '\n' || c == '\r':
+			c = ' '
+		case c == '|' && (i == 0 || s[i-1] != '\\'):
+			b.WriteByte('\\')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }

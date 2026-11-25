@@ -30,7 +30,7 @@ func TechStack(g *graph) string {
 			case "code.framework":
 				fws = append(fws, fmt.Sprintf("%s (%s)", f.Name, evidence(f)))
 			case "code.dependency":
-				d := fmt.Sprintf("`%s` %s", f.Name, strAttr(f, "version_constraint"))
+				d := fmt.Sprintf("%s %s", code(f.Name), strAttr(f, "version_constraint"))
 				if boolAttr(f, "dev") {
 					devDeps = append(devDeps, d)
 				} else {
@@ -49,7 +49,7 @@ func TechStack(g *graph) string {
 		if dfs := byKind["code.dockerfile"]; len(dfs) > 0 {
 			b.WriteString("### Containers\n\n")
 			for _, d := range dfs {
-				fmt.Fprintf(&b, "- %s: runs on `%s`, exposes %s — %s\n", d.Name, strAttr(d, "final_base_image"),
+				fmt.Fprintf(&b, "- %s: runs on %s, exposes %s — %s\n", d.Name, code(strAttr(d, "final_base_image")),
 					orNone(intsAsStrings(d.Attributes["exposed_ports"])), evidence(d))
 			}
 			b.WriteString("\n")
@@ -69,17 +69,17 @@ func TechStack(g *graph) string {
 			}
 			b.WriteString("### Infrastructure as code (Terraform)\n\n")
 			for _, t := range sortedCountKeys(counts) {
-				fmt.Fprintf(&b, "- `%s` × %d\n", t, counts[t])
+				fmt.Fprintf(&b, "- %s × %d\n", code(t), counts[t])
 			}
 			for _, m := range mods {
-				fmt.Fprintf(&b, "- module `%s` from `%s` — %s\n", m.Name, strAttr(m, "source"), evidence(m))
+				fmt.Fprintf(&b, "- module %s from %s — %s\n", code(m.Name), code(strAttr(m, "source")), evidence(m))
 			}
 			b.WriteString("\n")
 		}
 		if ks := byKind["k8s.workload"]; len(ks) > 0 {
 			b.WriteString("### Kubernetes workloads\n\n")
 			for _, k := range ks {
-				fmt.Fprintf(&b, "- %s `%s/%s` — images %s — %s\n", strAttr(k, "workload_kind"), strAttr(k, "namespace"), k.Name,
+				fmt.Fprintf(&b, "- %s %s — images %s — %s\n", strAttr(k, "workload_kind"), code(strAttr(k, "namespace")+"/"+k.Name),
 					strings.Join(listAttr(k, "image_repositories"), ", "), evidence(k))
 			}
 			b.WriteString("\n")

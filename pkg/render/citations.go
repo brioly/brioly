@@ -32,6 +32,11 @@ type Document struct {
 // are replaced with an "unverified" marker. It returns the resolved text
 // and the number of unknown citations.
 func ResolveCitations(md string, s *facts.Snapshot, published bool) (string, int) {
+	// Footnotes quote names and references: they are written from the
+	// escaped copy, like every other document.
+	if text, err := escaped(s); err == nil {
+		s = text
+	}
 	g := newGraph(s)
 	notes := map[string]facts.Annotation{}
 	for _, a := range s.Annotations {

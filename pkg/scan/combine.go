@@ -32,10 +32,9 @@ var ErrForeign = errors.New("the snapshot cannot be used")
 //   - Secrets are masked again, in every tier and also in references,
 //     evidence and coverage. A snapshot whose identifiers look like secrets
 //     is refused, since masking an ID would break what points at it.
-//   - Text is made plain: control characters and line breaks become
-//     spaces, long values are cut, and the characters that start a link,
-//     an image, HTML or code in a document are replaced. Text from an
-//     unknown sender can then not pose as a heading, a banner or a link.
+//   - Text is bounded: control characters and line breaks become spaces
+//     and long values are cut. Characters that mean something in Markdown
+//     or HTML are kept: the renderer shows every value as text.
 //   - Notes, owners and names from a components file are dropped, as are
 //     relationships made by grouping rules: both are made again here.
 //   - Hashes, the baseline key and components are recomputed.
@@ -155,10 +154,10 @@ func derivation(d *facts.Derivation, text func(*string)) {
 	}
 }
 
-// plain makes text from an unknown sender safe to place in a document: no
-// line breaks or control characters, a bounded length, and none of the
-// characters Markdown and HTML give meaning to. Resource names and
-// configuration values do not normally contain them.
+// plain bounds text from an unknown sender: no line breaks or control
+// characters and a limited length. It does not touch characters that mean
+// something in Markdown or HTML: the renderer shows every value as text
+// (render.Escape), so a value is stored as it was sent.
 func plain(s string) string {
 	if !utf8.ValidString(s) {
 		s = strings.ToValidUTF8(s, " ")
@@ -170,17 +169,8 @@ func plain(s string) string {
 			b.WriteRune('…')
 			break
 		}
-		switch {
-		case unicode.IsControl(c) || c == ' ' || c == ' ':
+		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
 			c = ' '
-		case c == '<' || c == '[':
-			c = '('
-		case c == '>' || c == ']':
-			c = ')'
-		case c == '`':
-			c = '\''
-		case c == '|' || c == '\\':
-			c = '/'
 		}
 		b.WriteRune(c)
 		n++
