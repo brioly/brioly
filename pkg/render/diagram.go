@@ -18,9 +18,150 @@ var diagramKinds = map[string]string{
 	"aws.rds.instance": "db", "aws.eks.cluster": "svc", "k8s.cluster": "svc",
 }
 
+// SystemDiagram is the system diagram as data: the boxes and lines Diagram
+// draws, for a reader that draws the picture itself. brioly Cloud uses it to
+// open and close the namespaces of a Kubernetes cluster; the files the CLI
+// writes always show everything.
+//
+// It is made from the fact graph only, so the same snapshot always gives
+// the same value. Every text in it (Name, Kind, Label) is already made safe
+// for a quoted Mermaid label, the way Diagram writes it; IDs are Mermaid
+// node IDs.
+type SystemDiagram struct {
+	// Internet is drawn when a load balancer faces the internet; its node ID
+	// is "internet".
+	Internet bool          `json:"internet"`
+	Areas    []DiagramArea `json:"areas"`
+	// Links are sorted and unique.
+	Links []DiagramLink `json:"links"`
+}
+
+// DiagramArea is a VPC, or, with an empty ID, what is outside any VPC.
+type DiagramArea struct {
+	ID    string        `json:"id"`
+	Label string        `json:"label"`
+	Nodes []DiagramNode `json:"nodes"`
+}
+
+// DiagramNode is one resource. A cluster whose workloads are known has
+// Namespaces and is drawn as a box around them.
+type DiagramNode struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	// Shape is "box", "db" (a data store), "lb" (a load balancer) or "fn"
+	// (a function).
+	Shape string `json:"shape"`
+	// Stale is the fact's Stale value: the resource was kept from an earlier
+	// scan, in whole or in part. Name already says so.
+	Stale      string             `json:"stale,omitempty"`
+	Namespaces []DiagramNamespace `json:"namespaces,omitempty"`
+
+	fact string // the fact ID, which orders the nodes
+}
+
+// DiagramNamespace is a Kubernetes namespace of a cluster and the workloads
+// in it, sorted by name; the one with an empty name holds the workloads
+// whose namespace is not known (a manifest that does not say), and comes
+// last.
+type DiagramNamespace struct {
+	ID        string        `json:"id"`
+	Name      string        `json:"name"`
+	Workloads []DiagramNode `json:"workloads"`
+}
+
+// DiagramLink is a line between two node IDs: dotted when inferred or a
+// dependency, solid when observed.
+type DiagramLink struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Dotted bool   `json:"dotted,omitempty"`
+}
+
+// DiagramOf returns the system diagram of a snapshot as data, or nil when
+// there is nothing to draw (Diagram is then empty too).
+func DiagramOf(s *facts.Snapshot) *SystemDiagram {
+	return diagramOf(newGraph(s))
+}
+
 // Diagram renders a Mermaid flowchart grouped by VPC. It is derived from
 // the fact graph only, never drawn by an LLM.
 func Diagram(g *graph) string {
+	d := diagramOf(g)
+	if d == nil {
+		return ""
+	}
+	return d.Mermaid()
+}
+
+// Mermaid writes the whole diagram, every workload shown, the way the CLI's
+// files have it: the workloads of a cluster are one list, not grouped by
+// namespace.
+func (d *SystemDiagram) Mermaid() string {
+	var b strings.Builder
+	b.WriteString("flowchart LR\n")
+	if d.Internet {
+		b.WriteString("  internet((Internet))\n")
+	}
+	for _, a := range d.Areas {
+		indent := "  "
+		if a.ID != "" {
+			fmt.Fprintf(&b, "  subgraph %s[\"%s\"]\n", a.ID, a.Label)
+			indent = "    "
+		}
+		for _, n := range a.Nodes {
+			if len(n.Namespaces) == 0 {
+				b.WriteString(indent + n.mermaid() + "\n")
+				continue
+			}
+			var ws []DiagramNode
+			for _, ns := range n.Namespaces {
+				ws = append(ws, ns.Workloads...)
+			}
+			sort.Slice(ws, func(i, j int) bool { return ws[i].fact < ws[j].fact })
+			fmt.Fprintf(&b, "%ssubgraph %s[\"%s · %s\"]\n", indent, n.ID, n.Name, n.Kind)
+			for _, w := range ws {
+				b.WriteString(indent + "  " + w.mermaid() + "\n")
+			}
+			b.WriteString(indent + "end\n")
+		}
+		if a.ID != "" {
+			b.WriteString("  end\n")
+		}
+	}
+	for _, l := range d.Links {
+		arrow := "-->"
+		if l.Dotted {
+			arrow = "-.->"
+		}
+		fmt.Fprintf(&b, "  %s %s %s\n", l.From, arrow, l.To)
+	}
+	return b.String()
+}
+
+func (n DiagramNode) mermaid() string {
+	text := n.Name + "<br/><small>" + n.Kind + "</small>"
+	switch n.Shape {
+	case "db":
+		return fmt.Sprintf("%s[(\"%s\")]", n.ID, text)
+	case "lb":
+		return fmt.Sprintf("%s{{\"%s\"}}", n.ID, text)
+	case "fn":
+		return fmt.Sprintf("%s>\"%s\"]", n.ID, text)
+	default:
+		return fmt.Sprintf("%s[\"%s\"]", n.ID, text)
+	}
+}
+
+func diagramNode(f facts.Fact) DiagramNode {
+	shape := diagramKinds[f.Kind]
+	if shape != "db" && shape != "lb" && shape != "fn" {
+		shape = "box"
+	}
+	return DiagramNode{ID: nodeID(f.ID), Name: label(displayName(f)), Kind: label(shortKind(f)), Shape: shape, Stale: f.Stale, fact: f.ID}
+}
+
+func diagramOf(g *graph) *SystemDiagram {
 	var nodes []facts.Fact
 	for _, f := range g.snap.Facts {
 		if _, ok := diagramKinds[f.Kind]; !ok {
@@ -37,7 +178,7 @@ func Diagram(g *graph) string {
 		nodes = append(nodes, f)
 	}
 	if len(nodes) == 0 {
-		return ""
+		return nil
 	}
 	// Kubernetes workloads: every one read from a cluster; one that is only
 	// declared in a repository is drawn when a load balancer leads to it.
@@ -91,47 +232,54 @@ func Diagram(g *graph) string {
 	}
 	sort.Strings(vpcIDs)
 
-	var b strings.Builder
-	b.WriteString("flowchart LR\n")
-	internet := false
+	d := &SystemDiagram{}
 	for _, lb := range g.kind("aws.elbv2.load_balancer") {
 		if strAttr(lb, "scheme") == "internet-facing" {
-			internet = true
+			d.Internet = true
 		}
 	}
-	if internet {
-		b.WriteString("  internet((Internet))\n")
-	}
 	for _, vpcID := range vpcIDs {
-		indent := "  "
+		area := DiagramArea{}
 		if vpcID != "" {
-			fmt.Fprintf(&b, "  subgraph %s[\"VPC %s\"]\n", nodeID(vpcID), label(displayName(g.byID[vpcID])))
-			indent = "    "
+			area.ID, area.Label = nodeID(vpcID), "VPC "+label(displayName(g.byID[vpcID]))
 		}
 		group := byVPC[vpcID]
 		sort.Slice(group, func(i, j int) bool { return group[i].ID < group[j].ID })
 		for _, n := range group {
-			ws := hosted[n.ID]
-			if len(ws) == 0 {
-				b.WriteString(indent + node(n) + "\n")
-				continue
+			dn := diagramNode(n)
+			byNS := map[string][]DiagramNode{}
+			for _, w := range hosted[n.ID] {
+				ns := strAttr(w, "namespace")
+				byNS[ns] = append(byNS[ns], diagramNode(w))
 			}
-			sort.Slice(ws, func(i, j int) bool { return ws[i].ID < ws[j].ID })
-			fmt.Fprintf(&b, "%ssubgraph %s[\"%s · %s\"]\n", indent, nodeID(n.ID), label(displayName(n)), label(shortKind(n)))
-			for _, w := range ws {
-				b.WriteString(indent + "  " + node(w) + "\n")
+			names := make([]string, 0, len(byNS))
+			for ns := range byNS {
+				names = append(names, ns)
 			}
-			b.WriteString(indent + "end\n")
+			// By name; the workloads whose namespace is not known last.
+			sort.Slice(names, func(i, j int) bool {
+				if (names[i] == "") != (names[j] == "") {
+					return names[j] == ""
+				}
+				return names[i] < names[j]
+			})
+			for _, ns := range names {
+				ws := byNS[ns]
+				sort.Slice(ws, func(i, j int) bool { return ws[i].fact < ws[j].fact })
+				dn.Namespaces = append(dn.Namespaces, DiagramNamespace{ID: nodeID(n.ID + "\x00namespace\x00" + ns), Name: label(ns), Workloads: ws})
+			}
+			area.Nodes = append(area.Nodes, dn)
 		}
-		if vpcID != "" {
-			b.WriteString("  end\n")
-		}
+		d.Areas = append(d.Areas, area)
 	}
 
-	var links []string
+	type link struct {
+		from, arrow, to string
+	}
+	var links []link
 	for _, lb := range g.kind("aws.elbv2.load_balancer") {
 		if strAttr(lb, "scheme") == "internet-facing" {
-			links = append(links, fmt.Sprintf("  internet --> %s", nodeID(lb.ID)))
+			links = append(links, link{"internet", "-->", nodeID(lb.ID)})
 		}
 		// Solid when the cluster itself reports the path; dotted when it is
 		// inferred from the Service tag and a manifest in a repository.
@@ -142,7 +290,7 @@ func Diagram(g *graph) string {
 			if g.observedPath(lb.ID, w.ID) {
 				arrow = "-->"
 			}
-			links = append(links, fmt.Sprintf("  %s %s %s", nodeID(lb.ID), arrow, nodeID(w.ID)))
+			links = append(links, link{nodeID(lb.ID), arrow, nodeID(w.ID)})
 			through[inCluster[w.ID]] = true
 		}
 		for _, w := range g.servicesBehind(lb.ID) {
@@ -152,7 +300,7 @@ func Diagram(g *graph) string {
 			if through[w.ID] {
 				continue // the line to the workload inside the cluster says it
 			}
-			links = append(links, fmt.Sprintf("  %s --> %s", nodeID(lb.ID), nodeID(w.ID)))
+			links = append(links, link{nodeID(lb.ID), "-->", nodeID(w.ID)})
 		}
 	}
 	drawn := map[string]bool{}
@@ -171,32 +319,20 @@ func Diagram(g *graph) string {
 		}
 		for _, to := range tos {
 			if drawn[to] && to != e.From {
-				links = append(links, fmt.Sprintf("  %s -.-> %s", nodeID(e.From), nodeID(to)))
+				links = append(links, link{nodeID(e.From), "-.->", nodeID(to)})
 			}
 		}
 	}
-	sort.Strings(links)
+	// In the order of the lines they are written as.
+	line := func(l link) string { return l.from + " " + l.arrow + " " + l.to }
+	sort.Slice(links, func(i, j int) bool { return line(links[i]) < line(links[j]) })
 	for i, l := range links {
 		if i > 0 && l == links[i-1] {
 			continue
 		}
-		b.WriteString(l + "\n")
+		d.Links = append(d.Links, DiagramLink{From: l.from, To: l.to, Dotted: l.arrow != "-->"})
 	}
-	return b.String()
-}
-
-func node(f facts.Fact) string {
-	text := label(displayName(f)) + "<br/><small>" + label(shortKind(f)) + "</small>"
-	switch diagramKinds[f.Kind] {
-	case "db":
-		return fmt.Sprintf("%s[(\"%s\")]", nodeID(f.ID), text)
-	case "lb":
-		return fmt.Sprintf("%s{{\"%s\"}}", nodeID(f.ID), text)
-	case "fn":
-		return fmt.Sprintf("%s>\"%s\"]", nodeID(f.ID), text)
-	default:
-		return fmt.Sprintf("%s[\"%s\"]", nodeID(f.ID), text)
-	}
+	return d
 }
 
 func shortKind(f facts.Fact) string {
