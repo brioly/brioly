@@ -1,6 +1,6 @@
 brioly
 Copyright 2026 The brioly Authors
 
-This product includes end-of-support dates from endoflife.date
-(https://endoflife.date), used under the MIT License, in
-pkg/lifecycle/data.json.
+The table of end-of-support dates that brioly reads from brioly.io is
+built from endoflife.date (https://endoflife.date), used under the MIT
+License, with scripts/update-lifecycle.sh.

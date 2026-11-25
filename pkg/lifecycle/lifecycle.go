@@ -2,15 +2,22 @@
 // supported: cluster versions, database engines, function runtimes, base
 // images and a few frameworks.
 //
-// It looks versions up in a table that is part of the binary (data.json,
-// refreshed with scripts/update-lifecycle.sh from endoflife.date). Nothing
-// is fetched while brioly runs, and no model is involved: a version that
-// is not in the table is reported as not known, never guessed.
+// It looks versions up in a table of published dates. The table is not
+// part of the program: brioly.io serves it (DefaultURL), and the CLI and
+// brioly Cloud both read it from there, so that both always judge by the
+// same dates and a new date does not wait for a release. The request sends
+// nothing about the system being scanned. No model is involved: a version
+// that is not in the table is reported as not known, never guessed.
 package lifecycle
 
 import (
-	_ "embed"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,8 +26,90 @@ import (
 	"github.com/brioly/brioly/pkg/facts"
 )
 
-//go:embed data.json
-var raw []byte
+// DefaultURL is where the table is read from.
+const DefaultURL = "https://brioly.io/lifecycle/v1/data.json"
+
+// URLEnv names the environment variable that replaces DefaultURL: for a
+// mirror inside a network that cannot reach brioly.io, and for tests.
+const URLEnv = "BRIOLY_LIFECYCLE_URL"
+
+// URL returns the address the table is read from.
+func URL() string {
+	if u := os.Getenv(URLEnv); u != "" {
+		return u
+	}
+	return DefaultURL
+}
+
+// maxTableBytes bounds what is read from the address.
+const maxTableBytes = 4 << 20
+
+// Fetch reads the table from url. Any failure is an error that says what
+// went wrong: there is no table inside the program to fall back on.
+func Fetch(ctx context.Context, url string) (*Table, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("version support dates: %s is not an address: %w", url, err)
+	}
+	req.Header.Set("User-Agent", "brioly")
+	req.Header.Set("Accept", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("version support dates: %s could not be reached: %w", url, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("version support dates: %s answered %s", url, res.Status)
+	}
+	raw, err := io.ReadAll(io.LimitReader(res.Body, maxTableBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("version support dates: reading %s: %w", url, err)
+	}
+	if len(raw) > maxTableBytes {
+		return nil, fmt.Errorf("version support dates: %s is larger than %d bytes", url, maxTableBytes)
+	}
+	t, err := Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("version support dates: %s: %w", url, err)
+	}
+	return t, nil
+}
+
+// Parse reads a table and checks it: what comes from an address is used
+// only if it has the shape and the dates a table has.
+func Parse(raw []byte) (*Table, error) {
+	var t Table
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return nil, fmt.Errorf("not a table of dates: %w", err)
+	}
+	if _, err := time.Parse("2006-01-02", t.Updated); err != nil {
+		return nil, errors.New("not a table of dates: no day it was updated")
+	}
+	if len(t.Products) == 0 {
+		return nil, errors.New("not a table of dates: no products")
+	}
+	for id, p := range t.Products {
+		if p.Name == "" || len(p.Cycles) == 0 {
+			return nil, fmt.Errorf("not a table of dates: product %q has no name or no versions", id)
+		}
+		for _, c := range p.Cycles {
+			if c.Cycle == "" {
+				return nil, fmt.Errorf("not a table of dates: product %q has a version without a name", id)
+			}
+			for _, day := range []string{c.EOL, c.Extended} {
+				if day == "" || day == "ended" {
+					continue
+				}
+				if _, err := time.Parse("2006-01-02", day); err != nil {
+					return nil, fmt.Errorf("not a table of dates: %q of %s %s is not a day", day, id, c.Cycle)
+				}
+			}
+		}
+	}
+	return &t, nil
+}
 
 // Table is the end-of-support dates brioly knows.
 type Table struct {
@@ -47,17 +136,6 @@ type Cycle struct {
 	// Extended is the day paid or extended support ends, when there is one.
 	Extended string `json:"extended"`
 }
-
-var table = func() Table {
-	var t Table
-	if err := json.Unmarshal(raw, &t); err != nil {
-		panic("lifecycle: data.json: " + err.Error())
-	}
-	return t
-}()
-
-// Data returns the table.
-func Data() Table { return table }
 
 // States of an item, from the one that needs attention first.
 const (
@@ -90,11 +168,11 @@ type Item struct {
 	State    string
 }
 
-// Find returns the versioned things in s with what the table says about
-// them, as of at: the time of the scan, so that the same snapshot always
+// Find returns the versioned things in s with what table says about them,
+// as of at: the time of the scan, so that the same snapshot always
 // gives the same answer. Items are ordered by how soon they need attention,
 // then by what they are.
-func Find(s *facts.Snapshot, at time.Time) []Item {
+func Find(s *facts.Snapshot, at time.Time, table *Table) []Item {
 	var items []Item
 	add := func(f facts.Fact, what, product, version string, candidates ...string) {
 		if version == "" {

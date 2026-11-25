@@ -1,42 +1,60 @@
 package lifecycle
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/brioly/brioly/pkg/facts"
 )
 
-// The table that ships is well formed: every date parses.
-func TestDataIsWellFormed(t *testing.T) {
-	d := Data()
-	if _, err := time.Parse("2006-01-02", d.Updated); err != nil || len(d.Products) == 0 {
-		t.Fatalf("updated %q, %d products", d.Updated, len(d.Products))
+// What an address returns is used only when it is a table: the shape and
+// every date are checked, and each failure says what was wrong.
+func TestFetchAndParse(t *testing.T) {
+	good := `{"updated":"2030-01-01","source":"https://example.test","products":{"nodejs":{"name":"Node.js","cycles":[{"cycle":"22","eol":"2031-04-30","extended":""},{"cycle":"23","eol":"","extended":""},{"cycle":"18","eol":"ended","extended":""}]}}}`
+	body, status := good, http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	table, err := Fetch(context.Background(), srv.URL)
+	if err != nil || table.Updated != "2030-01-01" || table.Products["nodejs"].Cycles[0].EOL != "2031-04-30" {
+		t.Fatalf("fetch: %+v %v", table, err)
 	}
-	for id, p := range d.Products {
-		if p.Name == "" || len(p.Cycles) == 0 {
-			t.Errorf("%s: name %q, %d cycles", id, p.Name, len(p.Cycles))
-		}
-		for _, c := range p.Cycles {
-			for _, day := range []string{c.EOL, c.Extended} {
-				if day == "" || day == "ended" {
-					continue
-				}
-				if _, err := time.Parse("2006-01-02", day); err != nil {
-					t.Errorf("%s %s: %q is not a date", id, c.Cycle, day)
-				}
-			}
-		}
-	}
-	for _, id := range frameworks {
-		if _, ok := d.Products[id]; !ok {
-			t.Errorf("no product %s for a framework", id)
+	for name, c := range map[string]struct {
+		body   string
+		status int
+		want   string
+	}{
+		"not found":      {good, http.StatusNotFound, "answered 404"},
+		"not JSON":       {"<html>", http.StatusOK, "not a table of dates"},
+		"no update day":  {`{"products":{"a":{"name":"A","cycles":[{"cycle":"1"}]}}}`, http.StatusOK, "no day it was updated"},
+		"no products":    {`{"updated":"2030-01-01","products":{}}`, http.StatusOK, "no products"},
+		"a bad date":     {`{"updated":"2030-01-01","products":{"a":{"name":"A","cycles":[{"cycle":"1","eol":"soon"}]}}}`, http.StatusOK, `"soon" of a 1 is not a day`},
+		"an empty cycle": {`{"updated":"2030-01-01","products":{"a":{"name":"A","cycles":[]}}}`, http.StatusOK, "no name or no versions"},
+	} {
+		body, status = c.body, c.status
+		if _, err := Fetch(context.Background(), srv.URL); err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), srv.URL) {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
-	for _, id := range images {
-		if _, ok := d.Products[id]; !ok {
-			t.Errorf("no product %s for an image", id)
-		}
+	srv.Close()
+	if _, err := Fetch(context.Background(), srv.URL); err == nil || !strings.Contains(err.Error(), "could not be reached") {
+		t.Errorf("unreachable: %v", err)
+	}
+	t.Setenv(URLEnv, "")
+	if URL() != DefaultURL {
+		t.Errorf("default address = %s", URL())
+	}
+	t.Setenv(URLEnv, srv.URL)
+	if URL() != srv.URL {
+		t.Errorf("address from the environment = %s", URL())
 	}
 }
 
@@ -60,9 +78,7 @@ func TestBaseImage(t *testing.T) {
 // Versions are matched against a fixed table and rated against the time of
 // the scan, so the same snapshot always gives the same answer.
 func TestFindRatesVersionsAsOfTheScan(t *testing.T) {
-	saved := table
-	defer func() { table = saved }()
-	table = Table{Updated: "2030-01-01", Products: map[string]Product{
+	table := &Table{Updated: "2030-01-01", Products: map[string]Product{
 		"amazon-eks":            {Name: "Amazon EKS", Cycles: []Cycle{{Cycle: "1.30", EOL: "2030-03-01", Extended: "2031-03-01"}, {Cycle: "1.28", EOL: "2029-06-01"}}},
 		"aws-lambda":            {Name: "AWS Lambda runtime", Cycles: []Cycle{{Cycle: "python3.13", EOL: "2032-01-01"}}},
 		"amazon-rds-mysql":      {Name: "Amazon RDS for MySQL", Cycles: []Cycle{{Cycle: "8.0.44", EOL: "2030-07-31"}, {Cycle: "8.0.45", EOL: "2030-07-31"}, {Cycle: "8.4.1", EOL: "2033-01-01"}, {Cycle: "8.4.2", EOL: "2034-01-01"}}},
@@ -98,7 +114,7 @@ func TestFindRatesVersionsAsOfTheScan(t *testing.T) {
 	at := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	got := map[string]Item{}
 	var order []string
-	for _, it := range Find(s, at) {
+	for _, it := range Find(s, at, table) {
 		got[it.FactID] = it
 		order = append(order, it.FactID)
 	}
@@ -125,7 +141,7 @@ func TestFindRatesVersionsAsOfTheScan(t *testing.T) {
 		t.Errorf("order: %v", order)
 	}
 	// A later scan of the same system rates the same versions differently.
-	later := Find(s, time.Date(2030, 6, 1, 0, 0, 0, 0, time.UTC))
+	later := Find(s, time.Date(2030, 6, 1, 0, 0, 0, 0, time.UTC), table)
 	for _, it := range later {
 		if it.FactID == "eks-new" && it.State != Ended {
 			t.Errorf("five months later: %+v", it)

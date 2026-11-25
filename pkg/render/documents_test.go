@@ -6,7 +6,16 @@ import (
 	"time"
 
 	"github.com/brioly/brioly/pkg/facts"
+	"github.com/brioly/brioly/pkg/lifecycle"
 )
+
+// testDates is a small table of end-of-support dates for the tests.
+var testDates = &lifecycle.Table{Updated: "2030-01-01", Source: "https://dates.example", Products: map[string]lifecycle.Product{
+	"amazon-eks":               {Name: "Amazon EKS", Cycles: []lifecycle.Cycle{{Cycle: "1.30", EOL: "2030-03-01", Extended: "2031-03-01"}}},
+	"amazon-aurora-postgresql": {Name: "Amazon Aurora PostgreSQL", Cycles: []lifecycle.Cycle{{Cycle: "16", EOL: "2033-02-28"}}},
+	"aws-lambda":               {Name: "AWS Lambda runtime", Cycles: []lifecycle.Cycle{{Cycle: "python3.13", EOL: "2032-01-01"}}},
+	"amazon-rds-mysql":         {Name: "Amazon RDS for MySQL", Cycles: []lifecycle.Cycle{{Cycle: "8.0.44", EOL: "2029-07-31"}}},
+}}
 
 func TestOpenRuleLevels(t *testing.T) {
 	for rule, want := range map[string]string{
@@ -59,7 +68,7 @@ func exposureSnapshot(t *testing.T) *facts.Snapshot {
 // was collected, and the document says what it does not cover.
 func TestExposureReview(t *testing.T) {
 	s := exposureSnapshot(t)
-	files, err := Files(s)
+	files, err := Files(s, testDates)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +101,7 @@ func TestExposureReview(t *testing.T) {
 		}
 	}
 	// Nothing to find: said plainly.
-	empty, err := Files(&facts.Snapshot{})
+	empty, err := Files(&facts.Snapshot{}, testDates)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,15 +117,17 @@ func TestVersionSupportDocument(t *testing.T) {
 	s.Facts = append(s.Facts,
 		facts.Fact{ID: "fn", Kind: "aws.lambda.function", Name: "hello", Ref: facts.SourceRef{Type: "arn", Value: "arn:aws:fn"}, Attributes: map[string]any{"runtime": "no-such-runtime"}},
 		facts.Fact{ID: "df", Kind: "code.dockerfile", Name: "Dockerfile", Ref: facts.SourceRef{Type: "file", Value: "Dockerfile"}, Attributes: map[string]any{"final_base_image": "acme/base"}, Details: map[string]any{"final_base_image_version": "3"}})
-	files, err := Files(s)
+	files, err := Files(s, testDates)
 	if err != nil {
 		t.Fatal(err)
 	}
 	doc := string(files[LifecycleFile])
 	for _, want := range []string{
 		"# Version support",
-		"| EKS cluster | prod | `1.30` |",
-		"| Database | main | `aurora-postgresql 16` |",
+		"(from [endoflife.date](https://dates.example), as of 2030-01-01)",
+		"| EKS cluster | prod | `1.30` | 2030-03-01 | **Ends soon**; extended support until 2031-03-01 |",
+		"| Database | legacy | `mysql 8.0` | 2029-07-31 | **Ended** |",
+		"| Database | main | `aurora-postgresql 16` | 2033-02-28 | Supported |",
 		"| Lambda function | hello | `no-such-runtime` | this version is not in the table for AWS Lambda runtime |",
 		"| Base image | Dockerfile | `acme/base:3` | brioly has no dates for this product |",
 		"## Not covered",
@@ -125,12 +136,18 @@ func TestVersionSupportDocument(t *testing.T) {
 			t.Errorf("version-support.md is missing %q:\n%s", want, doc)
 		}
 	}
-	again, _ := Files(s)
+	again, _ := Files(s, testDates)
 	if string(again[LifecycleFile]) != doc || string(again[ExposureFile]) != string(files[ExposureFile]) {
 		t.Error("the same snapshot gave different documents")
 	}
-	empty, _ := Files(&facts.Snapshot{})
+	empty, _ := Files(&facts.Snapshot{}, testDates)
 	if !strings.Contains(string(empty[LifecycleFile]), "Nothing with a version that brioly tracks was found") {
 		t.Errorf("empty version support:\n%s", empty[LifecycleFile])
+	}
+	// Without the table of dates the document says so; the others are made.
+	without, err := Files(s, nil)
+	if err != nil || !strings.Contains(string(without[LifecycleFile]), "could not be loaded") || strings.Contains(string(without[LifecycleFile]), "| EKS cluster |") ||
+		string(without[ExposureFile]) != string(files[ExposureFile]) {
+		t.Errorf("without dates (%v):\n%s", err, without[LifecycleFile])
 	}
 }

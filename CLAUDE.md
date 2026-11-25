@@ -15,6 +15,7 @@
 아래 원칙을 어기는 코드를 작성하지 마세요. 바꿔야 한다고 판단되면 먼저 제안하고 합의합니다.
 
 1. **수집은 결정적 코드로, LLM은 해석과 서술에만 씁니다. CLI는 처음부터 끝까지 결정적입니다.**
+   - **CLI가 밖으로 보내는 요청은 하나뿐입니다**: 버전 지원 종료일 표를 brioly.io에서 받는 GET. 수집한 내용은 담기지 않습니다.
    - **CLI(`cmd/brioly`)는 모델을 부르지 않습니다**(2026-11-26 결정). API 키 설정도, 모델이 쓰는 출력도, `--no-llm` 옵션도 없습니다. `brioly.yaml`의 예전 `llm`·`docs` 항목은 경고와 함께 무시합니다. 모델을 쓰는 코드는 `pkg/enrich`에만 있고, 이 모듈을 가져다 쓰는 brioly Cloud가 부릅니다.
    - 스캔은 SDK와 API 호출로 빠짐없이, 같은 입력이면 같은 출력이 나오게 수집합니다.
    - 스캔 단계에서 MCP나 LLM 에이전트를 쓰지 않습니다.
@@ -104,7 +105,7 @@
 | `pkg/collect/kube` | Kubernetes 수집기(선택). 클러스터 API에서 워크로드·Service·Ingress만 GET으로 읽음. Secret·ConfigMap·파드는 읽지 않음. 의존성 없는 HTTP 클라이언트, 테스트는 가짜 API 서버 |
 | `pkg/redact` | gitleaks 기반 secret 마스킹 |
 | `pkg/enrich` | 유일한 LLM 사용처. CLI는 쓰지 않고 brioly Cloud가 씀: 컴포넌트별 설명, 개요, JD 초안. 글쓰기 규칙은 `guide.md`, 이전 답(`State`)을 받아 바뀐 부분만 수정, 온보딩 문서는 코드로 조립. 한 종류만 쓰는 옵션(`NoOnboarding`, `NoJobDescriptions`) |
-| `pkg/lifecycle` | 버전 지원 종료일 조회. 바이너리에 포함된 표(`data.json`, `scripts/update-lifecycle.sh`로 endoflife.date에서 갱신)와 수집한 버전을 맞춤. 실행 중에는 아무것도 받아 오지 않고, 표에 없는 버전은 추측하지 않고 "모름"으로 둠. 얼마나 임박했는지는 스캔 시각 기준 |
+| `pkg/lifecycle` | 버전 지원 종료일 조회. 날짜 표는 바이너리에 넣지 않고 `https://brioly.io/lifecycle/v1/data.json`에서 받음(`Fetch`, 형식·날짜 검증). CLI는 스캔 전에 받고, 못 받으면 이유를 출력하고 종료(2026-11-26 결정). Cloud도 같은 주소를 읽음. `BRIOLY_LIFECYCLE_URL`로 주소를 바꿀 수 있음(폐쇄망 미러, 테스트). 표는 `scripts/update-lifecycle.sh`가 endoflife.date에서 만듦. 표에 없는 버전은 추측하지 않고 "모름". 얼마나 임박했는지는 스캔 시각 기준 |
 | `pkg/render` | 결정적 문서와 다이어그램, `[[fact-id]]` 인용 해석. 문서: `architecture.md`, `tech-stack.md`, `version-support.md`(버전 지원), `internet-exposure.md`(인터넷 노출 점검. 등급은 고정 규칙) |
 
 - 새 kind나 속성을 추가하면 `pkg/facts/kinds.go`에 등급을 선언합니다. 선언하지 않은 속성은 버려지고, 수집기 테스트의 `facts.Undeclared` 검사에서 걸립니다. 분류나 정규화를 바꾸면 `RegistryVersion`을 올립니다.

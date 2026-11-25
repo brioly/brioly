@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/brioly/brioly/pkg/facts"
+	"github.com/brioly/brioly/pkg/lifecycle"
 )
 
 // Files are the document paths written by Write, relative to the output
@@ -30,7 +31,11 @@ const (
 // by their path relative to the output directory. Callers that do not write
 // to a directory (brioly Cloud serves documents from stored snapshots) use
 // this; Write is Files plus the file system.
-func Files(s *facts.Snapshot) (map[string][]byte, error) {
+//
+// dates is the table of end-of-support dates (lifecycle.Fetch). With nil,
+// the version support document says that the dates could not be loaded; the
+// other documents do not depend on it.
+func Files(s *facts.Snapshot, dates *lifecycle.Table) (map[string][]byte, error) {
 	// Documents are written from a copy whose values are escaped; the
 	// diagram escapes its own labels and facts.json is the snapshot as it is.
 	text, err := escaped(s)
@@ -42,7 +47,7 @@ func Files(s *facts.Snapshot) (map[string][]byte, error) {
 	files := map[string][]byte{
 		ArchitectureFile: []byte(Architecture(g, diagram)),
 		TechStackFile:    []byte(TechStack(g)),
-		LifecycleFile:    []byte(Lifecycle(g, s)),
+		LifecycleFile:    []byte(Lifecycle(g, s, dates)),
 		ExposureFile:     []byte(Exposure(g, s)),
 		DiagramFile:      []byte(diagram),
 	}
@@ -55,8 +60,8 @@ func Files(s *facts.Snapshot) (map[string][]byte, error) {
 }
 
 // Write renders the deterministic documents of a snapshot into dir.
-func Write(dir string, s *facts.Snapshot) error {
-	files, err := Files(s)
+func Write(dir string, s *facts.Snapshot, dates *lifecycle.Table) error {
+	files, err := Files(s, dates)
 	if err != nil {
 		return err
 	}
