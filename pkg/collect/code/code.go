@@ -34,7 +34,12 @@ var skipDirs = map[string]bool{
 type Options struct {
 	Path string
 	Name string // optional override of the repository name
-	Now  func() time.Time
+	// Owner is the GitHub account the repository belongs to, for a copy
+	// that is not a checkout (a downloaded archive). It gives the copy the
+	// same ID and source as a clone. With Owner set, git is never run on
+	// the directory: what it holds is not trusted to say where it came from.
+	Owner string
+	Now   func() time.Time
 }
 
 // repo carries per-scan state shared by the file parsers.
@@ -68,26 +73,46 @@ func Collect(opts Options) (collect.Result, error) {
 		now = opts.Now
 	}
 
-	owner, name, remote := gitRemote(root)
+	// A copy whose owner the caller names is somebody else's files, not a
+	// checkout: git is never run on it. Files that look like a repository
+	// (a committed HEAD and config) could otherwise name another owner or
+	// make git read a configuration the repository's author wrote.
+	useGit := opts.Owner == ""
+	var owner, name, remote string
+	if useGit {
+		owner, name, remote = gitRemote(root)
+	}
 	if name == "" {
 		name = filepath.Base(root)
+	}
+	if !useGit {
+		owner = opts.Owner
+		if opts.Name != "" {
+			name = opts.Name
+		}
+		// Where the copy came from, not the temporary place it sits in.
+		remote = "https://github.com/" + owner + "/" + name
 	}
 	id := facts.RepoID(owner, name)
 	// A path below the top of a git checkout (a monorepo package) shares the
 	// checkout's remote; tell such paths apart by their subdirectory.
-	if sub := subdirOfCheckout(root); sub != "" {
-		id += "//" + sub
-		name += "/" + sub
+	if useGit {
+		if sub := subdirOfCheckout(root); sub != "" {
+			id += "//" + sub
+			name += "/" + sub
+		}
 	}
 	if opts.Name != "" {
 		name = opts.Name
 		id = facts.RepoID(owner, opts.Name)
 	}
 	r := &repo{
-		id:     id,
-		root:   root,
-		commit: gitOutput(root, "rev-parse", "HEAD"),
-		now:    now(),
+		id:   id,
+		root: root,
+		now:  now(),
+	}
+	if useGit {
+		r.commit = gitOutput(root, "rev-parse", "HEAD")
 	}
 	if owner != "" {
 		r.src = facts.Source{Connector: "github", Scope: owner + "/" + name}
@@ -139,7 +164,7 @@ func Collect(opts Options) (collect.Result, error) {
 	if primary != "" {
 		repoFact.Attributes["primary_language"] = primary
 	}
-	if branch := gitOutput(root, "symbolic-ref", "--short", "HEAD"); branch != "" {
+	if branch := branchOf(root, useGit); branch != "" {
 		repoFact.Volatile = map[string]any{"checked_out_branch": branch}
 	}
 	r.res.Facts = append(r.res.Facts, repoFact)
@@ -185,6 +210,14 @@ func (r *repo) addFact(f facts.Fact, edgeType string) {
 	r.res.Facts = append(r.res.Facts, f)
 	ref := f.Ref
 	r.res.AddEdge(edgeType, r.id, f.ID, &ref)
+}
+
+// branchOf returns the checked-out branch, or "" for a copy git is not run on.
+func branchOf(root string, useGit bool) string {
+	if !useGit {
+		return ""
+	}
+	return gitOutput(root, "symbolic-ref", "--short", "HEAD")
 }
 
 // subdirOfCheckout returns root's path relative to the top of its git

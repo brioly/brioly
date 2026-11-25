@@ -1,6 +1,7 @@
 package code
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -343,5 +344,62 @@ func TestKubernetesServiceSelectsWorkload(t *testing.T) {
 	want := svc.ID + " -> " + strings.Replace(svc.ID, "k8s/service.yaml:default/service/web-svc", "k8s/deployment.yaml:default/deployment/web", 1)
 	if len(routes) != 1 || routes[0] != want {
 		t.Errorf("routes = %v, want only %s", routes, want)
+	}
+}
+
+// A downloaded archive has no git remote. With the owner given, it gets the
+// ID, source and reference a clone of the same repository would get, and the
+// temporary directory it sits in appears nowhere.
+func TestOwnerNamesACopyWithoutARemote(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "extracted-1234")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/shop\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Collect(Options{Path: root, Name: "shop", Owner: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(raw)
+	if !strings.Contains(out, `"gh:acme/shop"`) || !strings.Contains(out, "https://github.com/acme/shop") {
+		t.Errorf("the copy is not identified as acme/shop: %s", out)
+	}
+	if strings.Contains(out, "extracted-1234") || strings.Contains(out, "local_repo") {
+		t.Errorf("the temporary directory or a local source leaked: %s", out)
+	}
+}
+
+// A repository can commit files that make its copy look like a bare git
+// repository naming another origin. With the owner given by the caller, git
+// is not asked, so those files decide nothing.
+func TestOwnerIsNotOverriddenByFilesThatLookLikeARepository(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	root := filepath.Join(t.TempDir(), "copy")
+	bare := exec.Command("git", "init", "--bare", "--quiet", root)
+	if out, err := bare.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	set := exec.Command("git", "-C", root, "remote", "add", "origin", "https://github.com/victim/secret.git")
+	if out, err := set.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/shop\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Collect(Options{Path: root, Name: "shop", Owner: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(res)
+	if out := string(raw); strings.Contains(out, "victim") || !strings.Contains(out, `"gh:acme/shop"`) {
+		t.Errorf("planted repository files changed the identity: %s", out)
 	}
 }
