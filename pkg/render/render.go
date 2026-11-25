@@ -84,10 +84,17 @@ func Architecture(g *graph, diagram string) string {
 		b.WriteString("## Components\n\n")
 		// One table per place the components run, when there is more than
 		// one such place: a system that is all on one platform keeps the
-		// single table it always had.
+		// single table it always had. Kubernetes workloads are left out:
+		// there a component is one workload, and the Compute part lists
+		// every workload with more than this table would say.
 		groups := map[string][]facts.Component{}
+		kubernetes := false
 		for _, c := range sortedComponents(comps) {
 			p := platform(g.byID[c.Anchor])
+			if p == platformKubernetes {
+				kubernetes = true
+				continue
+			}
 			groups[p] = append(groups[p], c)
 		}
 		for _, p := range platforms {
@@ -110,6 +117,9 @@ func Architecture(g *graph, diagram string) string {
 					mdEscape(strings.Join(append([]string{displayName(g.byID[c.Anchor])}, members...), ", ")), evidence(g.byID[c.Anchor]))
 			}
 			b.WriteString("\n")
+		}
+		if kubernetes {
+			b.WriteString("Kubernetes workloads are listed under Compute.\n\n")
 		}
 		writeNotes(&b, g.snap)
 	}
@@ -286,6 +296,24 @@ func writeIngress(b *strings.Builder, g *graph, in facts.Fact, prefix string) {
 
 // writeClusterWorkloads lists what runs in each cluster, as read from its
 // API server, or says that the cluster was not read.
+// declaredOnly returns the Kubernetes workloads that are known from a
+// manifest alone: those that stand for a component of their own. A
+// manifest whose workload runs in a cluster that was read belongs to that
+// workload's component and is shown with it ("Declared in").
+func declaredOnly(g *graph) []facts.Fact {
+	var out []facts.Fact
+	for _, c := range g.snap.Components {
+		if w, ok := g.byID[c.Anchor]; ok && w.Kind == "k8s.workload" && !live(w) {
+			out = append(out, w)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := strAttr(out[i], "namespace")+"/"+out[i].Name+"/"+out[i].ID, strAttr(out[j], "namespace")+"/"+out[j].Name+"/"+out[j].ID
+		return a < b
+	})
+	return out
+}
+
 func writeClusterWorkloads(b *strings.Builder, g *graph, clusters []facts.Fact) {
 	for _, c := range clusters {
 		var ws []facts.Fact
@@ -356,7 +384,8 @@ func writeCompute(b *strings.Builder, g *graph) {
 			asgs = append(asgs, a) // node groups are listed with their cluster
 		}
 	}
-	if len(services)+len(fns)+len(asgs)+len(instances)+len(clusters)+len(kclusters) == 0 {
+	declared := declaredOnly(g)
+	if len(services)+len(fns)+len(asgs)+len(instances)+len(clusters)+len(kclusters)+len(declared) == 0 {
 		return
 	}
 	b.WriteString("## Compute\n\n")
@@ -393,6 +422,20 @@ func writeCompute(b *strings.Builder, g *graph) {
 		}
 		b.WriteString("\n")
 		writeClusterWorkloads(b, g, kclusters)
+	}
+	if len(declared) > 0 {
+		b.WriteString("### Kubernetes workloads declared in repositories\n\n" +
+			"Manifests in the scanned repositories declare these workloads, and no cluster that was read runs one of the same kind, namespace and name. " +
+			"They may run in a cluster that is not connected, or not run any more.\n\n" +
+			"| Workload | Kind | Namespace | Declared in |\n|---|---|---|---|\n")
+		for _, w := range declared {
+			kind := strAttr(w, "workload_kind")
+			if s := strAttr(w, "schedule"); s != "" {
+				kind += " " + code(s)
+			}
+			fmt.Fprintf(b, "| %s | %s | %s | %s |\n", mdEscape(displayName(w)), mdEscape(kind), strAttr(w, "namespace"), evidence(w))
+		}
+		b.WriteString("\n")
 	}
 	if len(services) > 0 {
 		b.WriteString("### ECS services\n\n| Service | Cluster | Launch | Containers | Source |\n|---|---|---|---|---|\n")
@@ -585,7 +628,11 @@ func byPriority(rules []facts.Fact) []facts.Fact {
 
 // platforms are the places a component can run, in the order their tables
 // are written.
-var platforms = []string{"AWS", "Kubernetes", "Code"}
+var platforms = []string{"AWS", "Code"}
+
+// platformKubernetes is where a component runs whose resource is a
+// Kubernetes workload; such components have no table of their own.
+const platformKubernetes = "Kubernetes"
 
 // platform says where a component runs, from the resource that stands for
 // it. A component whose resource is in AWS may still have members read
@@ -593,7 +640,7 @@ var platforms = []string{"AWS", "Kubernetes", "Code"}
 func platform(anchor facts.Fact) string {
 	switch {
 	case strings.HasPrefix(anchor.Kind, "k8s."):
-		return "Kubernetes"
+		return platformKubernetes
 	case strings.HasPrefix(anchor.Kind, "code."):
 		return "Code"
 	default:

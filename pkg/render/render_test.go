@@ -466,22 +466,39 @@ func TestClusterWithoutWorkloadsSaysWhy(t *testing.T) {
 }
 
 // Components that run in different places get a table each; a system on
-// one platform keeps its single table.
+// one platform keeps its single table. Kubernetes workloads are not in the
+// tables: Compute lists them, also the ones known from a manifest alone.
 func TestComponentsAreListedByWhereTheyRun(t *testing.T) {
 	aws := facts.Fact{ID: "aws:svc", Kind: "aws.ecs.service", Name: "api", Ref: facts.SourceRef{Type: "arn", Value: "arn:aws:ecs:eu-west-1:111122223333:service/prod/api"}}
-	kube := facts.Fact{ID: "k8s:web", Kind: "k8s.workload", Name: "web", Ref: facts.SourceRef{Type: "url", Value: "https://cluster.example/apis/apps/v1/namespaces/shop/deployments/web"}}
-	one := &facts.Snapshot{Facts: []facts.Fact{aws}, Components: []facts.Component{{ID: "c1", Anchor: aws.ID, Name: "api", Role: "workload", Members: []string{aws.ID}}}}
+	repo := facts.Fact{ID: "gh:acme/tools", Kind: "code.repository", Name: "tools", Ref: facts.SourceRef{Type: "url", Value: "https://git.example/acme/tools"}}
+	manifest := facts.Fact{ID: "gh:acme/shop:k8s/web", Kind: "k8s.workload", Name: "web",
+		Attributes: map[string]any{"workload_kind": "Deployment", "namespace": "shop"},
+		Source:     facts.Source{Connector: "github", Scope: "acme/shop"},
+		Ref:        facts.SourceRef{Type: "file", Value: "k8s/deployment.yaml"}}
+	component := func(id string, f facts.Fact, role string) facts.Component {
+		return facts.Component{ID: id, Anchor: f.ID, Name: f.Name, Role: role, Members: []string{f.ID}}
+	}
+
+	one := &facts.Snapshot{Facts: []facts.Fact{aws}, Components: []facts.Component{component("c1", aws, "workload")}}
 	single := Architecture(newGraph(one), "")
-	if strings.Contains(single, "### AWS") || !strings.Contains(single, "## Components\n\n| Component | Role |") {
+	if strings.Contains(single, "### AWS") || !strings.Contains(single, "## Components\n\n| Component | Role |") || strings.Contains(single, "Kubernetes workloads") {
 		t.Errorf("one platform:\n%s", single)
 	}
-	two := &facts.Snapshot{Facts: []facts.Fact{aws, kube}, Components: []facts.Component{
-		{ID: "c2", Anchor: kube.ID, Name: "web", Role: "workload", Members: []string{kube.ID}},
-		{ID: "c1", Anchor: aws.ID, Name: "api", Role: "workload", Members: []string{aws.ID}},
-	}}
+
+	two := &facts.Snapshot{Facts: []facts.Fact{aws, repo}, Components: []facts.Component{component("c2", repo, "code_only"), component("c1", aws, "workload")}}
 	both := Architecture(newGraph(two), "")
-	a, k := strings.Index(both, "### AWS\n\n| Component |"), strings.Index(both, "### Kubernetes\n\n| Component |")
-	if a < 0 || k < a || strings.Index(both, "| api |") > k || strings.Index(both, "| web |") < k {
+	a, c := strings.Index(both, "### AWS\n\n| Component |"), strings.Index(both, "### Code\n\n| Component |")
+	if a < 0 || c < a || strings.Index(both, "| api |") > c || strings.Index(both, "| tools |") < c {
 		t.Errorf("two platforms:\n%s", both)
+	}
+
+	kube := &facts.Snapshot{Facts: []facts.Fact{aws, manifest}, Components: []facts.Component{component("c3", manifest, "workload"), component("c1", aws, "workload")}}
+	doc := Architecture(newGraph(kube), "")
+	table := doc[strings.Index(doc, "## Components"):strings.Index(doc, "Kubernetes workloads are listed under Compute.")]
+	if strings.Contains(table, "| web |") || strings.Contains(table, "###") || !strings.Contains(table, "| api |") {
+		t.Errorf("components with a Kubernetes workload:\n%s", doc)
+	}
+	if !strings.Contains(doc, "### Kubernetes workloads declared in repositories") || !strings.Contains(doc, "| web | Deployment | shop | `k8s/deployment.yaml` |") {
+		t.Errorf("the declared workload is not under Compute:\n%s", doc)
 	}
 }

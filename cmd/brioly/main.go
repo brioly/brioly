@@ -96,9 +96,6 @@ func generate(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("c", "brioly.yaml", "path to brioly.yaml")
 	outDir := fs.String("o", "", "output directory (default: output in brioly.yaml, or ./brioly-docs)")
-	// Kept so that commands written for earlier versions still run: the
-	// CLI never calls a model, so there is nothing left to turn off.
-	fs.Bool("no-llm", false, "no effect: the CLI never calls a model (kept for older scripts)")
 	history := fs.String("history", "", "also save the snapshot as facts-<time>.json in this directory, for brioly diff and replay")
 	if err := fs.Parse(args); err != nil {
 		return err
