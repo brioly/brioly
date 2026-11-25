@@ -10,6 +10,8 @@ brioly scans your AWS account, Kubernetes clusters and code repositories and wri
 brioly-docs/
 ├── architecture.md      # network, entry points, compute, data stores, dependencies, internet exposure
 ├── tech-stack.md        # cloud services, languages, frameworks, containers, CI/CD, IaC
+├── version-support.md   # when the versions you run on stop being supported (clusters, databases, runtimes, base images)
+├── internet-exposure.md # what the internet can reach, open security groups, public or unencrypted databases
 ├── diagrams/system.mmd  # Mermaid diagram generated from the facts
 └── facts.json           # everything brioly collected, with source references
 ```
@@ -62,6 +64,12 @@ Generated documents are never meant to be edited: they are rebuilt on every run.
 ## Changes that matter
 
 Every attribute is either structural (a database became public, a runtime changed), a detail (a patch version, an instance size) or volatile (task counts, image tags). `brioly diff` compares two snapshots and rates each change with fixed rules: opening a security group to the internet is always high, a patch bump is always info, a deployment is nothing at all. Keep snapshots with `generate --history DIR` and run `brioly replay DIR` to see which attributes churn in your environment.
+
+## Version support and exposure
+
+`version-support.md` lists the versions you run on (EKS and Kubernetes, RDS and Aurora engines, Lambda runtimes, the base images of your Dockerfiles, a few frameworks) with the day their standard support ends, soonest first. The dates are a table inside the binary, taken from [endoflife.date](https://endoflife.date) and refreshed with `scripts/update-lifecycle.sh`; brioly fetches nothing while it runs, and a version that is not in the table is listed as not known.
+
+`internet-exposure.md` lists what the internet can reach and the settings that widen or weaken that: security groups open to `0.0.0.0/0` (rated by which ports), databases with a public address or without encryption, public cluster endpoints. Every finding comes from a fixed rule that the document states, and it ends with what the review does not cover. It is a review of configuration, not a security audit.
 
 ## Keeping documents up to date
 

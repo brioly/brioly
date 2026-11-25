@@ -20,6 +20,8 @@ import (
 const (
 	ArchitectureFile = "architecture.md"
 	TechStackFile    = "tech-stack.md"
+	LifecycleFile    = "version-support.md"
+	ExposureFile     = "internet-exposure.md"
 	DiagramFile      = "diagrams/system.mmd"
 	FactsFile        = "facts.json"
 )
@@ -40,6 +42,8 @@ func Files(s *facts.Snapshot) (map[string][]byte, error) {
 	files := map[string][]byte{
 		ArchitectureFile: []byte(Architecture(g, diagram)),
 		TechStackFile:    []byte(TechStack(g)),
+		LifecycleFile:    []byte(Lifecycle(g, s)),
+		ExposureFile:     []byte(Exposure(g, s)),
 		DiagramFile:      []byte(diagram),
 	}
 	raw, err := json.MarshalIndent(s, "", "  ")

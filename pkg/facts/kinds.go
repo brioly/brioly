@@ -8,7 +8,7 @@ import (
 // RegistryVersion changes whenever the classification or a normalization
 // rule below changes. It is part of a snapshot's baseline key: snapshots
 // with different keys are not diffed against each other.
-const RegistryVersion = 5
+const RegistryVersion = 6
 
 // Kind declares, for one fact kind, which attributes exist and what a change
 // to each of them means. See docs/design/fact-schema-v1.md.
@@ -117,7 +117,10 @@ var Kinds = map[string]Kind{
 	"code.repository": {Structural: []string{"primary_language"}, Detail: []string{"languages"}, Volatile: []string{"checked_out_branch"}, Anchor: true},
 	"code.dependency": {Structural: []string{"ecosystem", "major", "dev", "manifest"}, Detail: []string{"version_constraint"}},
 	"code.framework":  {Structural: []string{"detected_from"}},
-	"code.dockerfile": {Structural: []string{"final_base_image", "exposed_ports"}, Detail: []string{"base_images", "multi_stage"}, Volatile: []string{"base_image_refs"}},
+	// final_base_image_version is the version the final image's tag starts
+	// with ("3.13" of python:3.13-slim): what version support is looked up
+	// by. The whole tag stays volatile.
+	"code.dockerfile": {Structural: []string{"final_base_image", "exposed_ports"}, Detail: []string{"base_images", "multi_stage", "final_base_image_version"}, Volatile: []string{"base_image_refs"}},
 	"code.ci_workflow": {
 		Structural: []string{"platform", "triggers", "deploy_targets"},
 		Detail:     []string{"actions"},
