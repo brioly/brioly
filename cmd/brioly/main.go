@@ -137,7 +137,7 @@ func generate(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if incomplete > 0 {
 		fmt.Fprintf(stdout, "%d part(s) of the scan were incomplete; see the top of architecture.md.\n", incomplete)
 	}
-	written := []string{render.ArchitectureFile, render.TechStackFile, render.DiagramFile, render.FactsFile}
+	written := []string{render.ArchitectureFile, render.TechStackFile, render.LifecycleFile, render.ExposureFile, render.DiagramFile, render.FactsFile}
 	fmt.Fprintf(stdout, "Wrote %s to %s\n", strings.Join(written, ", "), cfg.Output)
 	fmt.Fprintln(stdout, "\nTip: brioly Cloud (in development) keeps a history of these facts and alerts you to the changes that matter.")
 	return nil

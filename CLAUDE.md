@@ -18,7 +18,7 @@
    - **CLI(`cmd/brioly`)는 모델을 부르지 않습니다**(2026-11-26 결정). API 키 설정도, 모델이 쓰는 출력도, `--no-llm` 옵션도 없습니다. `brioly.yaml`의 예전 `llm`·`docs` 항목은 경고와 함께 무시합니다. 모델을 쓰는 코드는 `pkg/enrich`에만 있고, 이 모듈을 가져다 쓰는 brioly Cloud가 부릅니다.
    - 스캔은 SDK와 API 호출로 빠짐없이, 같은 입력이면 같은 출력이 나오게 수집합니다.
    - 스캔 단계에서 MCP나 LLM 에이전트를 쓰지 않습니다.
-2. **OSS CLI는 결정적 문서(아키텍처, 기술 스택, 다이어그램) 생성과 두 스냅샷의 diff까지 온전히 합니다.** 스캔 범위(계정·레포 수)로 기능을 막지 않습니다. 사실 이력 보관, 알림, 팀 기능은 brioly Cloud의 몫입니다.
+2. **OSS CLI는 결정적 문서(아키텍처, 기술 스택, 버전 지원, 인터넷 노출 점검, 다이어그램) 생성과 두 스냅샷의 diff까지 온전히 합니다.** 스캔 범위(계정·레포 수)로 기능을 막지 않습니다. 사실 이력 보관, 알림, 팀 기능은 brioly Cloud의 몫입니다.
 3. **전체 재스캔, 부분 재작성.**
    - LLM 호출은 컴포넌트 단위로 나누고, 멤버의 structural 해시가 바뀐 컴포넌트만 다시 씁니다.
    - 속성은 `structural` / `detail` / `volatile` 3등급입니다. 서술문에는 structural만, 표의 칸에는 detail까지 씁니다.
@@ -104,7 +104,8 @@
 | `pkg/collect/kube` | Kubernetes 수집기(선택). 클러스터 API에서 워크로드·Service·Ingress만 GET으로 읽음. Secret·ConfigMap·파드는 읽지 않음. 의존성 없는 HTTP 클라이언트, 테스트는 가짜 API 서버 |
 | `pkg/redact` | gitleaks 기반 secret 마스킹 |
 | `pkg/enrich` | 유일한 LLM 사용처. CLI는 쓰지 않고 brioly Cloud가 씀: 컴포넌트별 설명, 개요, JD 초안. 글쓰기 규칙은 `guide.md`, 이전 답(`State`)을 받아 바뀐 부분만 수정, 온보딩 문서는 코드로 조립. 한 종류만 쓰는 옵션(`NoOnboarding`, `NoJobDescriptions`) |
-| `pkg/render` | 결정적 문서와 다이어그램, `[[fact-id]]` 인용 해석 |
+| `pkg/lifecycle` | 버전 지원 종료일 조회. 바이너리에 포함된 표(`data.json`, `scripts/update-lifecycle.sh`로 endoflife.date에서 갱신)와 수집한 버전을 맞춤. 실행 중에는 아무것도 받아 오지 않고, 표에 없는 버전은 추측하지 않고 "모름"으로 둠. 얼마나 임박했는지는 스캔 시각 기준 |
+| `pkg/render` | 결정적 문서와 다이어그램, `[[fact-id]]` 인용 해석. 문서: `architecture.md`, `tech-stack.md`, `version-support.md`(버전 지원), `internet-exposure.md`(인터넷 노출 점검. 등급은 고정 규칙) |
 
 - 새 kind나 속성을 추가하면 `pkg/facts/kinds.go`에 등급을 선언합니다. 선언하지 않은 속성은 버려지고, 수집기 테스트의 `facts.Undeclared` 검사에서 걸립니다. 분류나 정규화를 바꾸면 `RegistryVersion`을 올립니다.
 - 테스트: `go test ./...`. 새 수집기는 "같은 입력이면 같은 해시", "배포(태그·revision 변경)로 해시가 바뀌지 않음", "환경변수 값이 결과에 남지 않음"을 테스트로 보장합니다.

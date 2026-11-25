@@ -25,7 +25,7 @@ func (r *repo) parseDockerfile(rel, p string) error {
 	}
 	stages := map[string]bool{} // names declared with FROM ... AS name
 	var images, tags []string
-	var finalImage string
+	var finalImage, finalVersion string
 	var ports []int
 	from := 0
 	for _, line := range lines {
@@ -45,14 +45,14 @@ func (r *repo) parseDockerfile(rel, p string) error {
 			from++
 			image := args[0]
 			if stages[strings.ToLower(image)] {
-				finalImage = "stage:" + image // builds on an earlier stage
+				finalImage, finalVersion = "stage:"+image, "" // builds on an earlier stage
 			} else {
 				repo, tag := collect.SplitImage(image)
 				images = append(images, repo)
 				if tag != "" {
 					tags = append(tags, image)
 				}
-				finalImage = repo
+				finalImage, finalVersion = repo, tagVersion.FindString(tag)
 			}
 			if len(args) >= 3 && strings.EqualFold(args[1], "as") {
 				stages[strings.ToLower(args[2])] = true
@@ -72,6 +72,12 @@ func (r *repo) parseDockerfile(rel, p string) error {
 	f := facts.NewObserved(facts.FileID(r.id, rel), "code.dockerfile", rel, r.src, r.fileRef(rel, 1, len(lines)), r.now)
 	f.Attributes["base_images"] = facts.SortedStrings(images)
 	f.Attributes["final_base_image"] = finalImage
+	if finalVersion != "" {
+		// Only the version the tag starts with: "3.13" of 3.13-slim. It is
+		// what support dates are looked up by; the rest of the tag (a
+		// variant, a date) says nothing about that.
+		f.Attributes["final_base_image_version"] = strings.TrimPrefix(finalVersion, "v")
+	}
 	f.Attributes["exposed_ports"] = ports
 	f.Attributes["multi_stage"] = from > 1
 	if len(tags) > 0 {
@@ -83,6 +89,10 @@ func (r *repo) parseDockerfile(rel, p string) error {
 
 // deployHints maps text found in a workflow's `uses` or `run` steps to a
 // deployment target. Only the target name is stored, never the step text.
+// tagVersion is the version an image tag starts with: "22" of 22-alpine,
+// "3.13.1" of 3.13.1-slim, nothing of latest.
+var tagVersion = regexp.MustCompile(`^v?\d+(?:\.\d+)*`)
+
 var deployHints = []struct {
 	needle, target string
 }{
