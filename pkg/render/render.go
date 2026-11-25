@@ -81,23 +81,41 @@ func Architecture(g *graph, diagram string) string {
 	}
 
 	if comps := g.snap.Components; len(comps) > 0 {
-		b.WriteString("## Components\n\n| Component | Role | Owner | Summary | Made of |\n|---|---|---|---|---|\n")
-		summaries := false
+		b.WriteString("## Components\n\n")
+		// One table per place the components run, when there is more than
+		// one such place: a system that is all on one platform keeps the
+		// single table it always had.
+		groups := map[string][]facts.Component{}
 		for _, c := range sortedComponents(comps) {
-			var members []string
-			for _, m := range c.Members {
-				if f, ok := g.byID[m]; ok && f.ID != c.Anchor {
-					members = append(members, displayName(f))
-				}
+			p := platform(g.byID[c.Anchor])
+			groups[p] = append(groups[p], c)
+		}
+		summaries := false
+		for _, p := range platforms {
+			list := groups[p]
+			if len(list) == 0 {
+				continue
 			}
-			summaries = summaries || c.Summary != ""
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s — %s |\n", mdEscape(c.Name), c.Role, mdEscape(c.Owner), mdEscape(c.Summary),
-				mdEscape(strings.Join(append([]string{displayName(g.byID[c.Anchor])}, members...), ", ")), evidence(g.byID[c.Anchor]))
+			if len(groups) > 1 {
+				fmt.Fprintf(&b, "### %s\n\n", p)
+			}
+			b.WriteString("| Component | Role | Owner | Summary | Made of |\n|---|---|---|---|---|\n")
+			for _, c := range list {
+				var members []string
+				for _, m := range c.Members {
+					if f, ok := g.byID[m]; ok && f.ID != c.Anchor {
+						members = append(members, displayName(f))
+					}
+				}
+				summaries = summaries || c.Summary != ""
+				fmt.Fprintf(&b, "| %s | %s | %s | %s | %s — %s |\n", mdEscape(c.Name), c.Role, mdEscape(c.Owner), mdEscape(c.Summary),
+					mdEscape(strings.Join(append([]string{displayName(g.byID[c.Anchor])}, members...), ", ")), evidence(g.byID[c.Anchor]))
+			}
+			b.WriteString("\n")
 		}
 		if summaries {
-			b.WriteString("\nSummaries are written by an LLM from the facts; the grouping itself is rule-based.\n")
+			b.WriteString("Summaries are written by an LLM from the facts; the grouping itself is rule-based.\n\n")
 		}
-		b.WriteString("\n")
 		writeNotes(&b, g.snap)
 	}
 
@@ -568,6 +586,24 @@ func byPriority(rules []facts.Fact) []facts.Fact {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return prio(out[i]) < prio(out[j]) })
 	return out
+}
+
+// platforms are the places a component can run, in the order their tables
+// are written.
+var platforms = []string{"AWS", "Kubernetes", "Code"}
+
+// platform says where a component runs, from the resource that stands for
+// it. A component whose resource is in AWS may still have members read
+// from a cluster or a repository: it is listed once, under its own.
+func platform(anchor facts.Fact) string {
+	switch {
+	case strings.HasPrefix(anchor.Kind, "k8s."):
+		return "Kubernetes"
+	case strings.HasPrefix(anchor.Kind, "code."):
+		return "Code"
+	default:
+		return "AWS"
+	}
 }
 
 func sortedComponents(comps []facts.Component) []facts.Component {

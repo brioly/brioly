@@ -428,3 +428,24 @@ func TestClusterWithoutWorkloadsSaysWhy(t *testing.T) {
 		}
 	}
 }
+
+// Components that run in different places get a table each; a system on
+// one platform keeps its single table.
+func TestComponentsAreListedByWhereTheyRun(t *testing.T) {
+	aws := facts.Fact{ID: "aws:svc", Kind: "aws.ecs.service", Name: "api", Ref: facts.SourceRef{Type: "arn", Value: "arn:aws:ecs:eu-west-1:111122223333:service/prod/api"}}
+	kube := facts.Fact{ID: "k8s:web", Kind: "k8s.workload", Name: "web", Ref: facts.SourceRef{Type: "url", Value: "https://cluster.example/apis/apps/v1/namespaces/shop/deployments/web"}}
+	one := &facts.Snapshot{Facts: []facts.Fact{aws}, Components: []facts.Component{{ID: "c1", Anchor: aws.ID, Name: "api", Role: "workload", Members: []string{aws.ID}}}}
+	single := Architecture(newGraph(one), "")
+	if strings.Contains(single, "### AWS") || !strings.Contains(single, "## Components\n\n| Component | Role |") {
+		t.Errorf("one platform:\n%s", single)
+	}
+	two := &facts.Snapshot{Facts: []facts.Fact{aws, kube}, Components: []facts.Component{
+		{ID: "c2", Anchor: kube.ID, Name: "web", Role: "workload", Members: []string{kube.ID}},
+		{ID: "c1", Anchor: aws.ID, Name: "api", Role: "workload", Members: []string{aws.ID}},
+	}}
+	both := Architecture(newGraph(two), "")
+	a, k := strings.Index(both, "### AWS\n\n| Component |"), strings.Index(both, "### Kubernetes\n\n| Component |")
+	if a < 0 || k < a || strings.Index(both, "| api |") > k || strings.Index(both, "| web |") < k {
+		t.Errorf("two platforms:\n%s", both)
+	}
+}
