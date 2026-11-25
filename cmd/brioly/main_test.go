@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,5 +155,91 @@ func TestComponentsDiffAndReplayEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(replay, "code.dependency.version_constraint") || !strings.Contains(replay, "code.dependency.major") {
 		t.Errorf("replay churn table:\n%s", replay)
+	}
+}
+
+// sync sends the snapshot, and only to a server that accepts the token.
+func TestSyncSendsTheSnapshot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var got struct {
+		Facts []map[string]any `json:"facts"`
+	}
+	var agent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sync/v1/snapshots" || r.Header.Get("Authorization") != "Bearer brioly_sync_good" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		agent = r.Header.Get("User-Agent")
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			t.Errorf("the body is not gzip: %v", err)
+			return
+		}
+		if err := json.NewDecoder(gz).Decode(&got); err != nil {
+			t.Errorf("the body is not a snapshot: %v", err)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"workspace": "acme", "facts": len(got.Facts), "url": "https://app.example/app"})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(rel, body string) {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("app/package.json", `{"dependencies": {"next": "15.0.0"}}`)
+	cfg := func(token string) string {
+		return "sources:\n  repos:\n    - path: ./app\ncloud:\n  url: " + srv.URL + "/sync\n  token: " + token + "\n"
+	}
+	run1 := func(args ...string) (string, error) {
+		var stdout, stderr bytes.Buffer
+		err := run(context.Background(), append(args, "-c", filepath.Join(dir, "brioly.yaml")), &stdout, &stderr)
+		return stdout.String() + stderr.String(), err
+	}
+
+	write("brioly.yaml", cfg("${BRIOLY_TOKEN}"))
+	t.Setenv("BRIOLY_TOKEN", "brioly_sync_good")
+	out, err := run1("sync", "--dry-run")
+	if err != nil || len(got.Facts) != 0 || !strings.Contains(out, "nothing was sent") {
+		t.Fatalf("dry run sent something or failed: %v\n%s", err, out)
+	}
+	out, err = run1("sync")
+	if err != nil {
+		t.Fatalf("sync failed: %v\n%s", err, out)
+	}
+	if len(got.Facts) == 0 || !strings.HasPrefix(agent, "brioly/") {
+		t.Errorf("the server got %d facts from %q", len(got.Facts), agent)
+	}
+	if !strings.Contains(out, `workspace "acme"`) || !strings.Contains(out, "https://app.example/app") {
+		t.Errorf("output: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "brioly-docs")); !os.IsNotExist(err) {
+		t.Error("sync wrote documents")
+	}
+
+	t.Setenv("BRIOLY_TOKEN", "brioly_sync_revoked")
+	if _, err := run1("sync"); err == nil || !strings.Contains(err.Error(), "did not accept the sync token") {
+		t.Errorf("a token the server refuses: %v", err)
+	}
+	// Another variable named as the token is never sent anywhere.
+	t.Setenv("BRIOLY_TOKEN", "AKIAEXAMPLEEXAMPLE00")
+	before := agent
+	agent = ""
+	if _, err := run1("sync"); err == nil || !strings.Contains(err.Error(), "not a brioly sync token") || agent != "" {
+		t.Errorf("a value that is not a sync token: %v (request made: %v)", err, agent != "")
+	}
+	agent = before
+	write("brioly.yaml", "sources:\n  repos:\n    - path: ./app\n")
+	if _, err := run1("sync"); err == nil || !strings.Contains(err.Error(), "no sync token") {
+		t.Errorf("no token configured: %v", err)
+	}
+	write("brioly.yaml", "sources:\n  repos:\n    - path: ./app\ncloud:\n  url: http://example.com/sync\n  token: brioly_sync_x\n")
+	if _, err := run1("sync"); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Errorf("a plain http address: %v", err)
 	}
 }

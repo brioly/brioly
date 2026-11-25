@@ -18,6 +18,14 @@ docs:
   language: English          # e.g. Korean, Japanese, German
   jd_roles: []               # e.g. ["Backend Engineer", "Cloud Engineer"]; empty = suggest
 
+# Optional: send what is collected to a brioly Cloud workspace with
+# `brioly sync`. Create the token in the workspace (Sources, brioly CLI) and
+# keep it out of this file: set BRIOLY_TOKEN in your environment or in
+# ~/.brioly/credentials. Only facts are sent, after masking; never source
+# code or environment variable values.
+# cloud:
+#   token: ${BRIOLY_TOKEN}
+
 # Names, owners, merges and notes for the components brioly finds. Optional.
 # Create a starter file with: brioly components init
 components: components.yaml

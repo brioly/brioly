@@ -6,12 +6,16 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,10 +44,10 @@ Usage:
   brioly components init [flags]     write a starter components file to edit
   brioly diff [-v] [-json] OLD NEW   compare two facts.json snapshots
   brioly replay DIR                  compare a series of snapshots and report attribute churn
+  brioly sync [--dry-run]            scan and send the facts to a brioly Cloud workspace
   brioly version                     print the version
 
 Planned:
-  brioly sync               scan and send facts to brioly Cloud
   brioly agent              long-running collector for brioly Cloud
 
 Run "brioly <command> -h" for flags.
@@ -75,8 +79,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "brioly", version)
 		return nil
-	case "sync", "agent":
-		return fmt.Errorf("%q is not available yet: it ships with brioly Cloud", args[0])
+	case "sync":
+		return syncCmd(ctx, args[1:], stdout, stderr)
+	case "agent":
+		return fmt.Errorf("%q is not available yet", args[0])
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return nil
@@ -367,4 +373,122 @@ func saveWritten(path string, st *enrich.State) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
+}
+
+// syncCmd scans like generate and sends the facts to a brioly Cloud
+// workspace instead of writing documents. Only the snapshot is sent: facts
+// with secrets masked. Source files and environment variable values are not
+// in it.
+func syncCmd(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cfgPath := fs.String("c", "brioly.yaml", "path to brioly.yaml")
+	dryRun := fs.Bool("dry-run", false, "scan and say what would be sent, without sending")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	for _, w := range cfg.Warnings {
+		fmt.Fprintln(stderr, "warning:", w)
+	}
+	token := strings.TrimSpace(cfg.Cloud.Token)
+	if token == "" && !*dryRun {
+		return errors.New("no sync token: create one in your brioly Cloud workspace (Sources, brioly CLI), set BRIOLY_TOKEN, and add to brioly.yaml:\n\n  cloud:\n    token: ${BRIOLY_TOKEN}")
+	}
+	// Only a sync token is ever sent. A configuration that names another
+	// variable here would otherwise hand that variable's value to whatever
+	// address it also names.
+	if token != "" && !strings.HasPrefix(token, syncTokenPrefix) {
+		return fmt.Errorf("cloud.token is not a brioly sync token (those start with %q): nothing was sent", syncTokenPrefix)
+	}
+	base := strings.TrimRight(cfg.Cloud.URL, "/")
+	if base == "" {
+		base = config.DefaultCloudURL
+	}
+	if u, err := url.Parse(base); err != nil || u.Host == "" || (u.Scheme != "https" && !isLoopback(u.Hostname())) {
+		return fmt.Errorf("cloud.url %q must be an https address", base)
+	}
+
+	if base != config.DefaultCloudURL {
+		fmt.Fprintf(stderr, "note: sending to %s, not to brioly Cloud's own address (cloud.url in brioly.yaml)\n", base)
+	}
+
+	snap, err := snapshot(ctx, cfg, stderr)
+	if err != nil {
+		return err
+	}
+	// Facts only. What the components file adds (names, owners, notes and
+	// who wrote them) stays here: brioly Cloud groups the facts itself.
+	snap.Annotations, snap.Components, snap.RegistryKey = nil, nil, ""
+	if err := snap.Finalize(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Collected %d facts and %d relationships.\n", len(snap.Facts), len(snap.Edges))
+	if *dryRun {
+		fmt.Fprintf(stdout, "Dry run: nothing was sent. A sync would send these facts (%d KB) to %s. Source files, environment variable values and the notes in the components file are not included.\n", len(raw)/1024+1, base)
+		return nil
+	}
+	fmt.Fprintf(stdout, "Sending them to %s (%d KB). Source files, environment variable values and the notes in the components file are not included.\n", base, len(raw)/1024+1)
+
+	var body bytes.Buffer
+	gz := gzip.NewWriter(&body)
+	if _, err := gz.Write(raw); err != nil {
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", base+"/v1/snapshots", &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("User-Agent", "brioly/"+version)
+	// A redirect is not followed: the snapshot and the token go to the
+	// address that was configured, or nowhere.
+	client := &http.Client{Timeout: 2 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send to brioly Cloud: %w", err)
+	}
+	defer resp.Body.Close()
+	var answer struct {
+		Workspace string `json:"workspace"`
+		Facts     int    `json:"facts"`
+		URL       string `json:"url"`
+		Error     string `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&answer)
+	switch {
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		return fmt.Errorf("%s answered with a redirect, which is not followed: check cloud.url", base)
+	case resp.StatusCode == http.StatusUnauthorized:
+		return errors.New("brioly Cloud did not accept the sync token: it is wrong or was revoked")
+	case resp.StatusCode < 200 || resp.StatusCode > 299:
+		if answer.Error != "" {
+			return fmt.Errorf("brioly Cloud refused the snapshot: %s", answer.Error)
+		}
+		return fmt.Errorf("brioly Cloud answered %d", resp.StatusCode)
+	}
+	fmt.Fprintf(stdout, "Received by workspace %q: %d facts.\n", answer.Workspace, answer.Facts)
+	if answer.URL != "" {
+		fmt.Fprintln(stdout, "Documents:", answer.URL)
+	}
+	return nil
+}
+
+// syncTokenPrefix starts every token brioly Cloud issues for sync.
+const syncTokenPrefix = "brioly_sync_"
+
+func isLoopback(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }

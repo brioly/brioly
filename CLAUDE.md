@@ -83,7 +83,7 @@
 
 ## 레포 구성
 
-- **`brioly`** (이 레포, Apache-2.0): CLI, 수집기, 사실 스키마, 해석·렌더링 파이프라인. 명령은 `brioly generate`(로컬 문서 생성)이 있고, `brioly sync`(한 번 수집해 Cloud로 전송)와 `brioly agent`(상시 실행)는 계획입니다.
+- **`brioly`** (이 레포, Apache-2.0): CLI, 수집기, 사실 스키마, 해석·렌더링 파이프라인. 명령은 `brioly generate`(로컬 문서 생성)와 `brioly sync`(한 번 수집해 사실만 Cloud로 전송)가 있고, `brioly agent`(상시 실행)는 계획입니다.
 - **brioly Cloud**(별도 비공개 레포)는 이 레포를 Go 모듈로 가져다 씁니다. diff 엔진은 이 레포에 둡니다.
 
 커넥터는 지원하는 인증 방식(`role` / `oauth` / `api_key`)을 선언하고, 모두 같은 사실 스키마를 반환합니다.
@@ -92,8 +92,8 @@
 
 | 경로 | 역할 |
 |---|---|
-| `cmd/brioly` | CLI (`generate`, `components init`, `diff`, `replay`, `version`). 설정을 읽어 `pkg/scan`을 부르고 결과를 파일로 씀 |
-| `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role) |
+| `cmd/brioly` | CLI (`generate`, `sync`, `components init`, `diff`, `replay`, `version`). 설정을 읽어 `pkg/scan`을 부르고 결과를 파일로 씀 |
+| `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. `scan.Clean`(밖에서 온 스냅샷을 다시 마스킹·재계산)과 `scan.Combine`(두 스냅샷을 하나로, 겹치면 앞의 것 우선)도 여기 있음. AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role) |
 | `pkg/facts` | Fact·Edge·Component·Snapshot, kind 레지스트리(`kinds.go`: 속성 등급), 결정적 ID, structural·detail 해시, `Finalize` |
 | `pkg/components` | 앵커 기반 컴포넌트 묶기(규칙), `components.yaml` 레지스트리 |
 | `pkg/diff` | 스냅샷 비교, 변경 이벤트, severity 규칙, 속성 변동 집계 |

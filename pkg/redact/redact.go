@@ -86,14 +86,17 @@ func (r *Redactor) keyed(key, value string) (string, bool) {
 	return out, out != value
 }
 
-// Fact masks secrets in a fact's name, attributes, volatile values and
-// labels. It returns the number of values that were changed.
+// Fact masks secrets in a fact's name, attributes, details, volatile
+// values and labels. It returns the number of values that were changed.
 func (r *Redactor) Fact(f *facts.Fact) int {
 	n := 0
 	if v, ok := r.String(f.Name); ok {
 		f.Name, n = v, n+1
 	}
 	n += r.walkMap(f.Attributes)
+	// Empty until Finalize sorts values into tiers; a snapshot that was
+	// already finalized elsewhere has its detail values and other tags here.
+	n += r.walkMap(f.Details)
 	n += r.walkMap(f.Volatile)
 	for k, v := range f.Labels {
 		if sensitiveKey(k) {

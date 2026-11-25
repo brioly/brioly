@@ -27,6 +27,9 @@ cp brioly.example.yaml brioly.yaml   # edit sources
 brioly generate --no-llm             # deterministic documents, no API key needed
 brioly generate                      # adds the onboarding guide and JD source text (needs llm.api_key)
 
+brioly sync --dry-run                # scan and report how much would be sent to brioly Cloud
+brioly sync                          # send the facts to a brioly Cloud workspace (needs cloud.token)
+
 brioly components init               # starter components.yaml: name things, set owners, add notes
 brioly diff old/facts.json new/facts.json   # what changed, rated by fixed rules
 ```
@@ -54,6 +57,7 @@ Running locally and using your own API key are two different things.
 
 - `brioly generate --no-llm`: nothing leaves your machine. brioly talks to AWS and reads your local repositories, and writes files.
 - `brioly generate` with `llm.api_key`: the collected facts are sent to the model provider (Anthropic) under your key, after masking. That means resource names, configuration values, relationships, dependency names, environment variable **names**, and the notes in `components.yaml`. Source code and environment variable values are never sent. How long the provider keeps the data is set by your agreement with them, not by brioly.
+- `brioly sync`: the collected facts are sent to your brioly Cloud workspace, after masking, over HTTPS with a sync token you create there. The same facts as `facts.json`: resource names, configuration values, relationships, dependency names, file paths and environment variable **names**. Source code, environment variable values and what you wrote in `components.yaml` are never sent, and nothing is sent to a model. Each send replaces the previous one. `--dry-run` scans and sends nothing.
 - Nothing is sent to brioly in either case.
 
 ## Your knowledge stays yours
