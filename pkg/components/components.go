@@ -107,8 +107,8 @@ func (ix *index) filter(ids []string, kind string) []string {
 // The returned warnings are meant for the user.
 func Build(s *facts.Snapshot, reg *Registry) []string {
 	linkHosts(s)
+	warnings := linkDeploys(s)
 	ix := newIndex(s)
-	var warnings []string
 	comps := map[string]*facts.Component{} // by anchor fact ID
 	claimed := map[string]bool{}           // listener rules owned by a workload
 	claimedTG := map[string]bool{}         // target groups owned by a workload
@@ -199,6 +199,9 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 				}
 			}
 		}
+		// How it is delivered: the workflow targets that deploy it or push
+		// its image, with their workflows.
+		c.Members = append(c.Members, deliveryMembers(ix, c.Members)...)
 	}
 
 	// Data stores: clusters and standalone instances. The instances of a
@@ -337,10 +340,26 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 		}
 	}
 	linked := map[string]bool{}
+	evidence := deployEvidence(ix, comps)
 	for _, anchor := range sortedAnchors(comps) {
 		c := comps[anchor]
 		if c.Role != RoleWorkload {
 			continue
+		}
+		// A workflow that deploys the workload or pushes its image says
+		// more than a name does: when it points at one repository, that
+		// is the one, whatever the names are.
+		switch byDeploy := evidence[anchor]; len(byDeploy) {
+		case 0:
+		case 1:
+			r := byDeploy[0]
+			c.Members = append(c.Members, r)
+			linked[r] = true
+			s.Edges = append(s.Edges, facts.NewEdge(facts.EdgeBuiltFrom, c.Anchor, r,
+				facts.Derivation{Type: facts.Inferred, Evidence: []string{c.Anchor, r}, Producer: ProducerDeployPath}, nil))
+			continue
+		default:
+			warnings = append(warnings, fmt.Sprintf("workflows in %d repositories deploy component %q or push its image; link the right one with \"add\" in the components file", len(byDeploy), c.Name))
 		}
 		candidates := map[string]bool{}
 		for _, n := range workloadNames(ix, c) {
@@ -497,7 +516,8 @@ func Relations(s *facts.Snapshot) []Relation {
 }
 
 // expandRepositories adds what says how a member repository's code is built
-// and shipped: frameworks, Dockerfiles and CI workflows. Dependencies stay
+// and shipped: frameworks, Dockerfiles, CI workflows and the deploy targets
+// of those workflows that are linked to no resource. Dependencies stay
 // out; there are too many, and they are listed in the tech stack document.
 func expandRepositories(c *facts.Component, ix *index) {
 	for _, m := range append([]string(nil), c.Members...) {
@@ -506,6 +526,16 @@ func expandRepositories(c *facts.Component, ix *index) {
 		}
 		c.Members = append(c.Members, ix.targets(m, facts.EdgeUses, "code.framework")...)
 		c.Members = append(c.Members, ix.targets(m, facts.EdgeContains, "code.dockerfile")...)
-		c.Members = append(c.Members, ix.targets(m, facts.EdgeContains, "code.ci_workflow")...)
+		for _, wf := range ix.targets(m, facts.EdgeContains, "code.ci_workflow") {
+			c.Members = append(c.Members, wf)
+			// What the workflow deploys that is linked to nothing stays
+			// with the repository; a target that is linked belongs to the
+			// component it deploys.
+			for _, t := range ix.targets(wf, facts.EdgeContains, "code.deploy_target") {
+				if len(ix.out[t][facts.EdgeDeploys])+len(ix.in[t][facts.EdgeBuiltFrom]) == 0 {
+					c.Members = append(c.Members, t)
+				}
+			}
+		}
 	}
 }

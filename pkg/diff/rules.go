@@ -83,6 +83,11 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 			raise(High, "cloudflare-proxy-disabled")
 		case f.Kind == "cloudflare.zone" && c.Attribute == "ssl_mode" && (c.After == "off" || c.After == "flexible") && c.Before != "off" && c.Before != "flexible" && c.Before != nil:
 			raise(Medium, "origin-encryption-weakened")
+		case f.Kind == "code.ci_workflow" && c.Attribute == "auth" && gains(c, "aws:static_keys"):
+			// A workflow that signed in through OIDC, or not at all, now
+			// uses access keys stored as secrets: a long-lived credential
+			// for what it deploys to exists where there was none.
+			raise(Medium, "deploy-keys-stored")
 		case c.Attribute == "engine" || c.Attribute == "engine_major" || c.Attribute == "runtime":
 			raise(Medium, "engine-or-runtime-changed")
 		case f.Kind == "code.dependency" && c.Attribute == "major":
@@ -90,6 +95,20 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 		}
 	}
 	return severity, rule
+}
+
+// gains reports whether a list attribute has a value it did not have.
+func gains(c Change, value string) bool {
+	had := false
+	for _, v := range stringList(c.Before) {
+		had = had || v == value
+	}
+	for _, v := range stringList(c.After) {
+		if v == value {
+			return !had
+		}
+	}
+	return false
 }
 
 // opensToInternet reports whether an ingress change added a rule whose

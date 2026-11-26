@@ -57,6 +57,11 @@ type repo struct {
 	// the workload it selects are usually in different files.
 	k8sPods     []k8sSelectable
 	k8sServices []k8sSelectable
+	// workflows are turned into facts after the walk: a workflow can call
+	// another one of the repository. workflowErrs names the workflow files
+	// that could not be parsed.
+	workflows    map[string]*workflowFile
+	workflowErrs []string
 }
 
 // Collect scans the repository at opts.Path.
@@ -156,6 +161,7 @@ func Collect(opts Options) (collect.Result, error) {
 		return collect.Result{}, err
 	}
 	r.linkKubernetesServices()
+	r.finishWorkflows()
 
 	repoFact := facts.NewObserved(r.id, "code.repository", name, r.src,
 		facts.SourceRef{Type: facts.RefURL, Value: remoteOrPath(remote, root), Commit: r.commit}, r.now)

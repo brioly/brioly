@@ -49,7 +49,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - run: docker push ${{ steps.ecr.outputs.registry }}/api:${{ github.sha }}
       - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: task.json
+          cluster: prod
+          service: api
       - run: echo done
 `,
 	"infra/main.tf": `module "vpc" {

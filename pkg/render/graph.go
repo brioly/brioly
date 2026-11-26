@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/brioly/brioly/pkg/components"
 	"github.com/brioly/brioly/pkg/facts"
 )
 
@@ -18,6 +19,9 @@ type graph struct {
 	in   map[string]map[string][]string // to -> edge type -> from
 	// inferred holds the edges that were derived, not observed.
 	inferred map[[3]string]bool
+	// deploy says, per deploy target, whether what it names was found
+	// (components.DeployStatuses). Nil means not worked out yet.
+	deploy map[string]components.DeployStatus
 }
 
 // liveConnector is the connector of facts read from a cluster's API server;
