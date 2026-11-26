@@ -57,6 +57,12 @@ type repo struct {
 	// the workload it selects are usually in different files.
 	k8sPods     []k8sSelectable
 	k8sServices []k8sSelectable
+	// workflows are turned into facts after the walk: a workflow can call
+	// another one of the repository. workflowErrs names the workflow files
+	// that could not be parsed.
+	workflows     map[string]*workflowFile
+	workflowErrs  []string
+	workflowBytes int
 }
 
 // Collect scans the repository at opts.Path.
@@ -145,6 +151,11 @@ func Collect(opts Options) (collect.Result, error) {
 			langBytes[lang] += info.Size()
 		}
 		if info.Size() > maxFileSize {
+			// Not parsed. For a workflow that is said: its deploy targets
+			// are not "none", they were not read.
+			if isWorkflow(rel) {
+				r.workflowErrs = append(r.workflowErrs, fmt.Sprintf("%s: not read: larger than %d MB", rel, maxFileSize>>20))
+			}
 			return nil
 		}
 		if err := r.parseFile(rel, path); err != nil {
@@ -156,6 +167,7 @@ func Collect(opts Options) (collect.Result, error) {
 		return collect.Result{}, err
 	}
 	r.linkKubernetesServices()
+	r.finishWorkflows()
 
 	repoFact := facts.NewObserved(r.id, "code.repository", name, r.src,
 		facts.SourceRef{Type: facts.RefURL, Value: remoteOrPath(remote, root), Commit: r.commit}, r.now)
@@ -191,7 +203,7 @@ func (r *repo) parseFile(rel, path string) error {
 		return r.parseRequirements(rel, path)
 	case lower == "dockerfile" || strings.HasPrefix(lower, "dockerfile.") || strings.HasSuffix(lower, ".dockerfile"):
 		return r.parseDockerfile(rel, path)
-	case strings.HasPrefix(rel, ".github/workflows/") && (strings.HasSuffix(base, ".yml") || strings.HasSuffix(base, ".yaml")):
+	case isWorkflow(rel):
 		return r.parseWorkflow(rel, path)
 	case strings.HasSuffix(base, ".tf"):
 		return r.parseTerraform(rel, path)
@@ -199,6 +211,11 @@ func (r *repo) parseFile(rel, path string) error {
 		return r.parseKubernetes(rel, path)
 	}
 	return nil
+}
+
+// isWorkflow reports whether a path is a GitHub Actions workflow file.
+func isWorkflow(rel string) bool {
+	return strings.HasPrefix(rel, ".github/workflows/") && (strings.HasSuffix(rel, ".yml") || strings.HasSuffix(rel, ".yaml"))
 }
 
 // fileRef returns a source reference to a file in this repository.

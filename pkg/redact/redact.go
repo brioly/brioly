@@ -41,6 +41,31 @@ func New() (*Redactor, error) {
 	return &Redactor{det: det}, nil
 }
 
+var (
+	sharedOnce sync.Once
+	shared     *Redactor
+	sharedErr  error
+)
+
+// Shared returns one Redactor for the process. Loading the rules takes a
+// moment, and a collector that asks per repository would pay it each time.
+func Shared() (*Redactor, error) {
+	sharedOnce.Do(func() { shared, sharedErr = New() })
+	return shared, sharedErr
+}
+
+// Masks reports whether value would be changed when stored as the value of
+// attribute key ("" for a value with no key: a name, an ID). A collector
+// asks before it builds an ID from a value: an ID is never masked
+// afterwards, so it must not hold what would be.
+func (r *Redactor) Masks(key, value string) bool {
+	if key != "" && sensitiveKey(key) {
+		return value != ""
+	}
+	_, changed := r.keyed(key, value)
+	return changed
+}
+
 // String returns s with detected secrets replaced, and whether anything was
 // replaced.
 func (r *Redactor) String(s string) (string, bool) {

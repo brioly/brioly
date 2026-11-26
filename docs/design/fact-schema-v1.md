@@ -91,7 +91,8 @@ const RegistryVersion = 1 // 분류가 바뀌면 올림 (5절 재기준)
 | `code.dependency` (dev) | | 전부 detail |
 | `code.framework` | 이름 | |
 | `code.dockerfile` | final_base_image, exposed_ports | base_images, multi_stage |
-| `code.ci_workflow` | triggers, deploy_targets | actions |
+| `code.ci_workflow` | triggers, trigger_filters, deploy_targets, calls, environments, auth | actions |
+| `code.deploy_target` | target_type, job, environment, auth, unresolved, 대상을 가리키는 값 (v0 문서의 "GitHub Actions 배포 경로") | recognized_by, role_to_assume, defined_in, resolved_from |
 | `iac.terraform.*` | resource_type, module source | |
 | `k8s.workload` | 종류, namespace, image_repositories, ports | replicas |
 
@@ -144,7 +145,8 @@ LLM 없이 edge를 따라갑니다.
 | 워크로드 | ← `routes_to` | 타깃 그룹, 그리고 그 타깃 그룹으로 보내는 리스너 규칙 |
 | 로드 밸런서 | `contains` → | 리스너 (규칙은 목적지 워크로드 쪽에 속함) |
 | 워크로드 | `built_from` → | 레포 (아래) |
-| 레포 (멤버가 된 경우) | `uses`, `contains` → | 프레임워크, Dockerfile, CI 워크플로. 의존성은 수가 많아 넣지 않음(기술 스택 문서에 나열) |
+| 레포 (멤버가 된 경우) | `uses`, `contains` → | 프레임워크, Dockerfile, CI 워크플로와 그 워크플로의 배포 대상 중 어디에도 연결되지 않은 것. 의존성은 수가 많아 넣지 않음(기술 스택 문서에 나열) |
+| 워크로드의 멤버 | ← `deploys`, `built_from` → | 그것을 배포하거나 그 이미지를 push하는 배포 대상(`code.deploy_target`)과 그 대상이 든 워크플로 (2026-11-26) |
 
 RDS 클러스터의 인스턴스도 멤버로 넣지 않습니다. 리플리카 오토스케일링으로 늘고 줄기 때문이며, 추가·삭제는 `info` 이벤트로만 남깁니다.
 
@@ -155,6 +157,7 @@ VPC, 서브넷, 라우트 테이블, 보안 그룹은 어느 컴포넌트에도 
 1. 워크로드의 이미지 저장소 이름(마지막 경로 요소)이나 워크로드 이름이 레포 이름과 **정확히 같고 후보가 하나**이면 연결합니다(`derivation: inferred`, `producer: rule:name-match`).
 2. 후보가 여럿이거나 없으면 LLM에게 **후보 목록 안에서 고르게** 합니다(없음도 선택지). 결과는 컴포넌트 해시로 캐시합니다.
 3. 레지스트리에 사람이 적은 연결이 있으면 그것이 우선합니다.
+4. (2026-11-26) 레포의 workflow가 그 워크로드를 배포하거나 그 이미지를 push한다는 근거가 레포 하나를 가리키면 1의 이름 규칙보다 먼저 연결합니다(`producer: rule:deploy-path`). 조건은 v0 문서의 "GitHub Actions 배포 경로" 절에 있습니다.
 
 **컴포넌트 간 관계**는 멤버 사이의 `depends_on`·`routes_to`·`runs_on`에서 계산합니다(예: "Public API → main-db").
 
@@ -265,6 +268,7 @@ type ChangeEvent struct {
 | 서브넷이 private → public | high |
 | internet-facing 로드 밸런서 추가, 워크로드·데이터 저장소 추가 또는 삭제 | medium |
 | 엔진 major 변경, 런타임 변경, 새 `depends_on` | medium |
+| workflow가 저장된 AWS access key를 쓰기 시작함(`auth`에 `aws:static_keys`가 생김) | medium |
 | 그 밖의 structural 변경 | low |
 | detail 변경 | info |
 

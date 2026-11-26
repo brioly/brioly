@@ -8,7 +8,7 @@ import (
 // RegistryVersion changes whenever the classification or a normalization
 // rule below changes. It is part of a snapshot's baseline key: snapshots
 // with different keys are not diffed against each other.
-const RegistryVersion = 6
+const RegistryVersion = 7
 
 // Kind declares, for one fact kind, which attributes exist and what a change
 // to each of them means. See docs/design/fact-schema-v1.md.
@@ -121,9 +121,33 @@ var Kinds = map[string]Kind{
 	// with ("3.13" of python:3.13-slim): what version support is looked up
 	// by. The whole tag stays volatile.
 	"code.dockerfile": {Structural: []string{"final_base_image", "exposed_ports"}, Detail: []string{"base_images", "multi_stage", "final_base_image_version"}, Volatile: []string{"base_image_refs"}},
+	// A CI workflow file. trigger_filters say when a trigger applies
+	// ("push branches: main"); deploy_targets are the coarse kinds of what
+	// it deploys to; calls are the reusable workflows its jobs call;
+	// environments are the deployment environments its jobs name; auth is
+	// how its jobs sign in ("aws:oidc", "aws:static_keys").
 	"code.ci_workflow": {
-		Structural: []string{"platform", "triggers", "deploy_targets"},
+		Structural: []string{"platform", "triggers", "trigger_filters", "deploy_targets", "calls", "environments", "auth"},
 		Detail:     []string{"actions"},
+	},
+	// One thing a workflow job deploys to, as the workflow file names it
+	// (pkg/collect/code/deploy.go). target_type says what kind of thing; the
+	// fields that name it depend on the type (cluster and service, function,
+	// registry and image, ...). A name the file does not settle is written as
+	// what it depends on ("${{ vars.ECS_SERVICE }}") and listed in
+	// unresolved. conditional says the job or step is under an if:, which
+	// is not evaluated. auth is how the job signs in to where the target is:
+	// "oidc", "static_keys", "role" (a role is assumed and the file does not
+	// show with what) or "api_token" (the word "credentials" is not
+	// used as a key: values under such a key are masked). Nothing here
+	// changes on a run of the workflow: no commit, tag, run number or step
+	// output is kept.
+	"code.deploy_target": {
+		Structural: []string{"target_type", "job", "environment", "conditional", "auth", "unresolved",
+			"cluster", "service", "function", "bucket", "distribution", "stack", "app", "registry", "image",
+			"namespace", "workload_kind", "workload", "release", "chart", "path", "kustomize", "worker", "project",
+			"region", "account"},
+		Detail: []string{"recognized_by", "role_to_assume", "defined_in", "resolved_from"},
 	},
 	"iac.terraform.resource": {Structural: []string{"resource_type", "provider", "module_dir"}},
 	"iac.terraform.module":   {Structural: []string{"module_dir", "source"}},

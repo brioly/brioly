@@ -87,90 +87,9 @@ func (r *repo) parseDockerfile(rel, p string) error {
 	return nil
 }
 
-// deployHints maps text found in a workflow's `uses` or `run` steps to a
-// deployment target. Only the target name is stored, never the step text.
 // tagVersion is the version an image tag starts with: "22" of 22-alpine,
 // "3.13.1" of 3.13.1-slim, nothing of latest.
 var tagVersion = regexp.MustCompile(`^v?\d+(?:\.\d+)*`)
-
-var deployHints = []struct {
-	needle, target string
-}{
-	{"amazon-ecs-deploy-task-definition", "ecs"}, {"aws ecs ", "ecs"}, {"ecs-deploy", "ecs"},
-	{"aws lambda update-function-code", "lambda"}, {"serverless deploy", "lambda"}, {"sam deploy", "lambda"},
-	{"kubectl ", "kubernetes"}, {"helm upgrade", "kubernetes"}, {"aws eks ", "kubernetes"},
-	{"aws s3 sync", "s3"}, {"aws cloudfront create-invalidation", "cloudfront"},
-	{"terraform apply", "terraform"}, {"hashicorp/setup-terraform", "terraform"},
-	{"amazon-ecr-login", "ecr"}, {"docker push", "container_registry"}, {"docker/build-push-action", "container_registry"},
-	{"cdk deploy", "cdk"}, {"vercel", "vercel"},
-}
-
-func (r *repo) parseWorkflow(rel, p string) error {
-	raw, err := os.ReadFile(p)
-	if err != nil {
-		return err
-	}
-	var wf struct {
-		Name string    `yaml:"name"`
-		On   yaml.Node `yaml:"on"`
-		Jobs map[string]struct {
-			Steps []struct {
-				Uses string `yaml:"uses"`
-				Run  string `yaml:"run"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(raw, &wf); err != nil {
-		return err
-	}
-	triggers := workflowTriggers(&wf.On)
-	var actions, targets []string
-	for _, job := range wf.Jobs {
-		for _, s := range job.Steps {
-			text := strings.ToLower(s.Uses + "\n" + s.Run)
-			if s.Uses != "" {
-				actions = append(actions, strings.SplitN(s.Uses, "@", 2)[0])
-			}
-			for _, h := range deployHints {
-				if strings.Contains(text, h.needle) {
-					targets = append(targets, h.target)
-				}
-			}
-		}
-	}
-	name := wf.Name
-	if name == "" {
-		name = path.Base(rel)
-	}
-	f := facts.NewObserved(facts.FileID(r.id, rel), "code.ci_workflow", name, r.src,
-		r.fileRef(rel, 1, bytes.Count(raw, []byte("\n"))+1), r.now)
-	f.Attributes["platform"] = "github_actions"
-	f.Attributes["triggers"] = facts.SortedStrings(triggers)
-	f.Attributes["actions"] = facts.SortedStrings(actions)
-	f.Attributes["deploy_targets"] = facts.SortedStrings(targets)
-	r.addFact(f, facts.EdgeContains)
-	return nil
-}
-
-func workflowTriggers(n *yaml.Node) []string {
-	switch n.Kind {
-	case yaml.ScalarNode:
-		return []string{n.Value}
-	case yaml.SequenceNode:
-		var out []string
-		for _, c := range n.Content {
-			out = append(out, c.Value)
-		}
-		return out
-	case yaml.MappingNode:
-		var out []string
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			out = append(out, n.Content[i].Value)
-		}
-		return out
-	}
-	return nil
-}
 
 var tfBlock = regexp.MustCompile(`^\s*(resource|module|data)\s+"([^"]+)"(?:\s+"([^"]+)")?\s*\{`)
 var tfSource = regexp.MustCompile(`^\s*source\s*=\s*"([^"]+)"`)

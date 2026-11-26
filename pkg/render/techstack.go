@@ -57,8 +57,9 @@ func TechStack(g *graph) string {
 		if wfs := byKind["code.ci_workflow"]; len(wfs) > 0 {
 			b.WriteString("### CI/CD\n\n")
 			for _, w := range wfs {
-				fmt.Fprintf(&b, "- **%s** on %s → deploys to: %s — %s\n", w.Name, strings.Join(listAttr(w, "triggers"), ", "),
+				fmt.Fprintf(&b, "- **%s** on %s → deploys to: %s — %s\n", w.Name, when(w),
 					orNone(listAttr(w, "deploy_targets")), evidence(w))
+				writeWorkflowDetail(&b, g, w)
 			}
 			b.WriteString("\n")
 		}

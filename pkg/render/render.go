@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/brioly/brioly/pkg/components"
 	"github.com/brioly/brioly/pkg/facts"
 	"github.com/brioly/brioly/pkg/lifecycle"
 )
@@ -43,6 +44,9 @@ func Files(s *facts.Snapshot, dates *lifecycle.Table) (map[string][]byte, error)
 		return nil, err
 	}
 	g := newGraph(text)
+	// Whether what a workflow deploys was found is worked out from the
+	// values as collected, not from their escaped form.
+	g.deploy = components.DeployStatuses(s)
 	diagram := Diagram(newGraph(s))
 	files := map[string][]byte{
 		ArchitectureFile: []byte(Architecture(g, diagram)),
@@ -214,6 +218,7 @@ func Architecture(g *graph, diagram string) string {
 	writeCompute(&b, g)
 	writeData(&b, g)
 	writeDependencies(&b, g)
+	writeDelivery(&b, g)
 	writeExposure(&b, g)
 	return b.String()
 }
