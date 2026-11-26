@@ -319,3 +319,70 @@ func clone(s *facts.Snapshot) (*facts.Snapshot, error) {
 	}
 	return &out, nil
 }
+
+// Without returns a copy of a finalized snapshot with everything of the
+// named connectors taken out: their facts, their coverage, and every
+// relationship that had one of those facts at an end. What is left is put
+// together again from itself, as Combine does: relationships made by
+// grouping rules and components are derived anew, so that nothing in the
+// result was made from what was removed (a component anchored on a removed
+// fact is gone, one that only had such a fact as a member is built without
+// it). The argument is not changed.
+//
+// It is how a caller forgets one source of a snapshot it stored without
+// reading the others again: the result is what the same scan would have
+// been had that source not been part of it, as far as the sources are read
+// independently of each other. (A collector that used another's findings
+// while reading, as the Kubernetes collector does with the clusters of the
+// cloud scan, leaves facts that still say so.)
+//
+// removed is how many facts were taken out. A snapshot left with no fact
+// and no coverage is returned as that: the caller decides whether an empty
+// snapshot is worth keeping.
+func Without(snap *facts.Snapshot, connectors ...string) (out *facts.Snapshot, removed int, err error) {
+	if snap == nil {
+		return nil, 0, errors.New("a snapshot is needed")
+	}
+	out, err = clone(snap)
+	if err != nil {
+		return nil, 0, err
+	}
+	drop := map[string]bool{}
+	for _, c := range connectors {
+		drop[c] = true
+	}
+	kept := map[string]bool{}
+	keep := out.Facts[:0]
+	for _, f := range out.Facts {
+		if drop[f.Source.Connector] {
+			removed++
+			continue
+		}
+		kept[f.ID] = true
+		keep = append(keep, f)
+	}
+	out.Facts = keep
+	coverage := out.Coverage[:0]
+	for _, c := range out.Coverage {
+		if !drop[c.Connector] {
+			coverage = append(coverage, c)
+		}
+	}
+	out.Coverage = coverage
+	edges := out.Edges[:0]
+	for _, e := range out.Edges {
+		// Rule-made relationships are derived again below, from what is left.
+		if strings.HasPrefix(e.Derivation.Producer, "rule:") || !kept[e.From] || !kept[e.To] {
+			continue
+		}
+		edges = append(edges, e)
+	}
+	out.Edges = edges
+	// Notes are attached to components and facts by a components file, which
+	// a stored snapshot is rebuilt without (as in Clean and Combine).
+	out.RegistryKey = ""
+	if err := rebuild(out); err != nil {
+		return nil, 0, err
+	}
+	return out, removed, nil
+}
