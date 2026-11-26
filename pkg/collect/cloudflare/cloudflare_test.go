@@ -613,3 +613,86 @@ func TestAccountsThatAreNotVisited(t *testing.T) {
 		t.Error("an account that is no longer read is not reported")
 	}
 }
+
+// A caller that could not use its token at all (brioly Cloud, when the
+// stored token is refused or cannot be opened) says so with Unread: every
+// fact of the scan before is kept and marked, none is reported as deleted,
+// and the reason given is what the coverage says.
+func TestUnreadKeepsEverything(t *testing.T) {
+	prev := finalized(t, collectFrom(t, &fake{secondAccount: true}))
+	for refused, status := range map[bool]string{true: facts.CoverageDenied, false: facts.CoverageError} {
+		cur := finalized(t, cloudflare.Unread("the stored API token was not accepted", refused))
+		if len(cur.Facts) != 0 || len(cur.Edges) != 0 {
+			t.Fatalf("Unread made %d facts and %d edges", len(cur.Facts), len(cur.Edges))
+		}
+		for _, c := range cur.Coverage {
+			if c.Connector != cloudflare.Connector || c.Scope != cloudflare.Scope || c.Status != status || c.Detail != "the stored API token was not accepted" {
+				t.Errorf("coverage %+v, want %s", c, status)
+			}
+		}
+		// An entry for every kind of fact, where a scan with a rejected
+		// token records one.
+		got := coverage(cur)
+		for _, kind := range cloudflare.Kinds {
+			region := cloudflare.AllRegions
+			if kind == "cloudflare.zone" {
+				region = ""
+			}
+			if _, ok := got[region+"|"+kind]; !ok {
+				t.Errorf("Unread lacks the coverage entry of %s", kind)
+			}
+		}
+		for _, e := range diff.Compare(prev, cur).Events {
+			if e.Type == diff.FactRemoved {
+				t.Errorf("%s is reported as deleted", e.Subject)
+			}
+		}
+		cur.CarryForward(prev)
+		if err := cur.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		if len(cur.Facts) != len(prev.Facts) {
+			t.Errorf("%d facts after carrying forward, %d before", len(cur.Facts), len(prev.Facts))
+		}
+		for _, f := range cur.Facts {
+			if f.Stale != facts.StaleNotRead {
+				t.Errorf("%s is %q, want kept and marked not read", f.ID, f.Stale)
+			}
+		}
+	}
+}
+
+// What a caller collected itself goes through Run like what Run collects:
+// it is in the snapshot with its relationships made by rule, secrets are
+// masked, and the token it was read with is nowhere.
+func TestRunTakesWhatTheCallerCollected(t *testing.T) {
+	read := collectFrom(t, &fake{})
+	snap, err := scan.Run(context.Background(), scan.Options{Collected: []collect.Result{read}, ID: "scan-1", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID(t, snap, "cloudflare:zone/"+accountID+"/example.com")
+	if len(snap.Components) == 0 {
+		t.Error("no components were built from what the caller collected")
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), testToken) {
+		t.Error("the snapshot holds the token")
+	}
+	for _, p := range planted {
+		if strings.Contains(string(raw), p) {
+			t.Errorf("the snapshot holds %s", p)
+		}
+	}
+	// And what could not be read is kept from the scan before.
+	again, err := scan.Run(context.Background(), scan.Options{Collected: []collect.Result{cloudflare.Unread("not read", true)}, Previous: snap, ID: "scan-2", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Facts) != len(snap.Facts) {
+		t.Errorf("%d facts after a scan that read nothing, %d before", len(again.Facts), len(snap.Facts))
+	}
+}

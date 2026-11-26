@@ -31,6 +31,13 @@ type Options struct {
 	Kubernetes *Kubernetes
 	Cloudflare *Cloudflare
 
+	// Collected are results the caller collected itself, for a source whose
+	// credentials it does not hand to Run (brioly Cloud reads Cloudflare
+	// this way: the token stays inside the one function that opened it).
+	// They are merged after what Run collects and go through everything
+	// that follows like the rest: masking, carrying forward, components.
+	Collected []collect.Result
+
 	// Registry is the components file: names, owners, merges, notes and
 	// resources to ignore. Nil means none.
 	Registry *components.Registry
@@ -243,6 +250,9 @@ func collectAll(ctx context.Context, opts Options, logf func(string, ...any)) (*
 				logf("warning: Cloudflare: %s%s was not read in full (%s): %s", cov.Kind, where, cov.Status, cov.Detail)
 			}
 		}
+		res.Merge(r)
+	}
+	for _, r := range opts.Collected {
 		res.Merge(r)
 	}
 	return &facts.Snapshot{Facts: res.Facts, Edges: res.Edges, Coverage: res.Coverage}, nil
