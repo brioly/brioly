@@ -95,7 +95,7 @@
 | 경로 | 역할 |
 |---|---|
 | `cmd/brioly` | CLI (`generate`, `sync`, `components init`, `diff`, `replay`, `version`). 설정을 읽어 `pkg/scan`을 부르고 결과를 파일로 씀. 모델을 부르지 않음(`pkg/enrich`를 import하지 않음) |
-| `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. `scan.Clean`(밖에서 온 스냅샷을 다시 마스킹·재계산)과 `scan.Combine`(두 스냅샷을 하나로, 겹치면 앞의 것 우선), `scan.Without`(저장된 스냅샷에서 한 커넥터의 사실·관계·coverage를 빼고 규칙 관계와 컴포넌트를 다시 만듦)도 여기 있음. AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role). 호출한 쪽이 직접 수집한 결과는 `Options.Collected`로 넣음(자격 증명을 `Run`에 넘기지 않는 호출자용. 마스킹·이어받기·컴포넌트는 똑같이 거침) |
+| `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. `scan.Clean`(밖에서 온 스냅샷을 다시 마스킹·재계산)과 `scan.Combine`(두 스냅샷을 하나로, 겹치면 앞의 것 우선), `scan.Without`와 제자리 판 `scan.Strip`(저장된 스냅샷에서 한 커넥터의 사실·관계·coverage를 빼고 규칙 관계와 컴포넌트를 다시 만듦)도 여기 있음. 저장된 스냅샷을 다시 조립한 결과는 원래 읽힌 baseline key를 지킴(지금 버전의 key로 찍으면 재분류가 변경으로 보임). secret 마스킹은 프로세스 공용 Redactor 하나를 씀(`redact.Shared`: gitleaks 호출은 한 잠금 아래). AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role). 호출한 쪽이 직접 수집한 결과는 `Options.Collected`로 넣음(자격 증명을 `Run`에 넘기지 않는 호출자용. 마스킹·이어받기·컴포넌트는 똑같이 거침) |
 | `pkg/facts` | Fact·Edge·Component·Snapshot, kind 레지스트리(`kinds.go`: 속성 등급), 결정적 ID, structural·detail 해시, `Finalize` |
 | `pkg/components` | 앵커 기반 컴포넌트 묶기(규칙), `components.yaml` 레지스트리. 배포 대상과 그것이 가리키는 리소스의 연결도 여기서 규칙으로 만듦(`deploy.go`: `rule:deploy-target`, `rule:deploy-manifest`, `rule:image-push`, `rule:deploy-path`). 이름만으로 이은 연결은 inferred, 후보가 둘 이상이면 고르지 않음(`DeployStatuses`가 문서에 이유를 줌) |
 | `pkg/diff` | 스냅샷 비교, 변경 이벤트, severity 규칙, 속성 변동 집계 |

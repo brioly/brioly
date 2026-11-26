@@ -476,3 +476,24 @@ func TestWithoutIsTheScanOfTheOtherSources(t *testing.T) {
 		t.Errorf("without a source that is not there: %d removed, %v", removed, err)
 	}
 }
+
+// Strip is Without done in place: the same result, in the snapshot given.
+func TestStripIsWithoutInPlace(t *testing.T) {
+	full := withOrigins(t, finalized(t, collectFrom(t, &fake{})), "0.0.0.0/0:443")
+	want, removed, err := scan.Without(full, "cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := scan.Strip(full, "cloudflare")
+	if err != nil || n != removed {
+		t.Fatalf("Strip: %d removed, %v; Without removed %d", n, err, removed)
+	}
+	a, _ := json.Marshal(full)
+	b, _ := json.Marshal(want)
+	if string(a) != string(b) {
+		t.Error("Strip left something other than what Without returns")
+	}
+	if _, err := scan.Strip(nil, "cloudflare"); err == nil {
+		t.Error("Strip of no snapshot is not an error")
+	}
+}

@@ -379,6 +379,21 @@ func Without(snap *facts.Snapshot, connectors ...string) (out *facts.Snapshot, r
 	if err != nil {
 		return nil, 0, err
 	}
+	removed, err = Strip(out, connectors...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, removed, nil
+}
+
+// Strip is Without done to the snapshot itself, for a caller that holds the
+// only copy and has no use for the original: a large snapshot is then held
+// in memory once, not twice. On error the snapshot must not be used.
+func Strip(snap *facts.Snapshot, connectors ...string) (removed int, err error) {
+	if snap == nil {
+		return 0, errors.New("a snapshot is needed")
+	}
+	out := snap
 	drop := map[string]bool{}
 	for _, c := range connectors {
 		drop[c] = true
@@ -393,6 +408,7 @@ func Without(snap *facts.Snapshot, connectors ...string) (out *facts.Snapshot, r
 		kept[f.ID] = true
 		keep = append(keep, f)
 	}
+	clear(out.Facts[len(keep):]) // what was dropped is not kept alive by the slice
 	out.Facts = keep
 	coverage := out.Coverage[:0]
 	for _, c := range out.Coverage {
@@ -409,18 +425,19 @@ func Without(snap *facts.Snapshot, connectors ...string) (out *facts.Snapshot, r
 		}
 		edges = append(edges, e)
 	}
+	clear(out.Edges[len(edges):])
 	out.Edges = edges
 	// Notes are attached to components and facts by a components file, which
 	// a stored snapshot is rebuilt without (as in Clean and Combine).
-	original := snap.BaselineKey
+	original := out.BaselineKey
 	if out.RegistryKey != "" {
 		// The key named a components file that is not applied here.
 		original = ""
 	}
 	out.RegistryKey = ""
 	if err := rebuild(out); err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	keepClassification(out, original)
-	return out, removed, nil
+	return removed, nil
 }
