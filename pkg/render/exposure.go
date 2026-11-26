@@ -75,6 +75,29 @@ func openRule(rule string) (level, why string, open bool) {
 // escaped copy of the snapshot, for names and sources; raw is the snapshot
 // as collected, which rules and values are read from.
 func Exposure(g *graph, raw *facts.Snapshot) string {
+	doc, _ := reviewExposure(g, raw)
+	return doc
+}
+
+// reached is one thing the review lists under "What the internet can
+// reach": the fact and, in a few fixed words, in what way.
+type reached struct {
+	id, how string
+}
+
+// exposureReview is what the review found, as data: the diagram's internet
+// exposure view is drawn from it, so the picture and the document are one
+// judgment made once.
+type exposureReview struct {
+	findings []finding // sorted as the document lists them
+	reach    []reached // in the order the document lists them
+}
+
+// reviewExposure applies the rules of the exposure review once and returns
+// the document together with what it found.
+func reviewExposure(g *graph, raw *facts.Snapshot) (string, *exposureReview) {
+	review := &exposureReview{}
+	reach := func(f facts.Fact, how string) { review.reach = append(review.reach, reached{f.ID, how}) }
 	rawByID := make(map[string]facts.Fact, len(raw.Facts))
 	for _, f := range raw.Facts {
 		rawByID[f.ID] = f
@@ -116,7 +139,7 @@ func Exposure(g *graph, raw *facts.Snapshot) string {
 	}
 
 	// ---- What the internet can reach ----
-	var reach strings.Builder
+	var reachText strings.Builder
 	for _, lb := range g.kind("aws.elbv2.load_balancer") {
 		if strAttr(lb, "scheme") != "internet-facing" {
 			continue
@@ -137,8 +160,9 @@ func Exposure(g *graph, raw *facts.Snapshot) string {
 			behind = append(behind, displayName(w))
 		}
 		sort.Strings(behind)
-		fmt.Fprintf(&reach, "- Load balancer **%s** (%s), listening on %s, sends traffic to: %s — %s\n", displayName(lb), strAttr(lb, "type"),
+		fmt.Fprintf(&reachText, "- Load balancer **%s** (%s), listening on %s, sends traffic to: %s — %s\n", displayName(lb), strAttr(lb, "type"),
 			orNone(listeners), orNone(behind), evidence(lb))
+		reach(lb, "Internet-facing load balancer")
 	}
 	for _, c := range g.kind("aws.eks.cluster") {
 		if !boolAttr(c, "endpoint_public_access") {
@@ -154,12 +178,18 @@ func Exposure(g *graph, raw *facts.Snapshot) string {
 			from = "from any address"
 			add(levelMedium, "Kubernetes API server reachable from any address (requests still have to authenticate)", c)
 		}
-		fmt.Fprintf(&reach, "- API server of EKS cluster **%s**, %s — %s\n", displayName(c), from, evidence(c))
+		fmt.Fprintf(&reachText, "- API server of EKS cluster **%s**, %s — %s\n", displayName(c), from, evidence(c))
+		if anywhere {
+			reach(c, "API server reachable from any address")
+		} else {
+			reach(c, "API server reachable from listed addresses")
+		}
 	}
 	for _, svc := range g.kind("aws.ecs.service") {
 		if strAttr(svc, "assign_public_ip") == "ENABLED" {
-			fmt.Fprintf(&reach, "- Tasks of ECS service **%s** get public IP addresses; what reaches them is decided by their security groups — %s\n", displayName(svc), evidence(svc))
+			fmt.Fprintf(&reachText, "- Tasks of ECS service **%s** get public IP addresses; what reaches them is decided by their security groups — %s\n", displayName(svc), evidence(svc))
 			add(levelLow, "ECS tasks get public IP addresses", svc)
+			reach(svc, "Tasks get public IP addresses")
 		}
 	}
 	for _, svc := range g.kind("k8s.service") {
@@ -168,24 +198,27 @@ func Exposure(g *graph, raw *facts.Snapshot) string {
 		}
 		switch strAttr(svc, "service_type") {
 		case "LoadBalancer":
-			fmt.Fprintf(&reach, "- Kubernetes Service **%s** (namespace %s) is of type LoadBalancer: the cluster asks its cloud for a load balancer, which may face the internet — %s\n",
+			fmt.Fprintf(&reachText, "- Kubernetes Service **%s** (namespace %s) is of type LoadBalancer: the cluster asks its cloud for a load balancer, which may face the internet — %s\n",
 				displayName(svc), strAttr(svc, "namespace"), evidence(svc))
+			reach(svc, "Service of type LoadBalancer")
 		case "NodePort":
-			fmt.Fprintf(&reach, "- Kubernetes Service **%s** (namespace %s) is of type NodePort: it is open on a port of every node, for whoever can reach the nodes — %s\n",
+			fmt.Fprintf(&reachText, "- Kubernetes Service **%s** (namespace %s) is of type NodePort: it is open on a port of every node, for whoever can reach the nodes — %s\n",
 				displayName(svc), strAttr(svc, "namespace"), evidence(svc))
 			add(levelLow, "Kubernetes Service of type NodePort", svc)
+			reach(svc, "Service of type NodePort")
 		}
 	}
 	for _, in := range g.kind("k8s.ingress") {
 		if live(in) {
-			fmt.Fprintf(&reach, "- Kubernetes Ingress **%s** (namespace %s) serves %s — %s\n", displayName(in), strAttr(in, "namespace"),
+			fmt.Fprintf(&reachText, "- Kubernetes Ingress **%s** (namespace %s) serves %s — %s\n", displayName(in), strAttr(in, "namespace"),
 				orNone(listAttr(in, "hosts")), evidence(in))
+			reach(in, "Ingress")
 		}
 	}
 
 	// ---- Cloudflare ----
-	cfReach, cfHosts := cloudflareExposure(g, rawByID, add)
-	reach.WriteString(cfReach)
+	cfReach, cfHosts := cloudflareExposure(g, rawByID, add, reach)
+	reachText.WriteString(cfReach)
 
 	// ---- Data stores ----
 	var data strings.Builder
@@ -221,6 +254,7 @@ func Exposure(g *graph, raw *facts.Snapshot) string {
 		}
 		return a.fact.ID < b.fact.ID
 	})
+	review.findings = findings
 	counts := map[string]int{}
 	for _, f := range findings {
 		counts[f.level]++
@@ -262,10 +296,10 @@ func Exposure(g *graph, raw *facts.Snapshot) string {
 		"- **Low**: web ports (80, 443) or ICMP open to the internet, which a public site needs; an open group that nothing is attached to; plain HTTP without a redirect; tasks with public addresses; NodePort Services; a database instance in one availability zone" + cfLow + ".\n\n")
 
 	b.WriteString("## What the internet can reach\n\n")
-	if reach.Len() == 0 && cfHosts == "" {
+	if reachText.Len() == 0 && cfHosts == "" {
 		b.WriteString("Nothing that faces the internet was found in what was read: no internet-facing load balancer, no public cluster endpoint, no Ingress.\n\n")
-	} else if reach.Len() > 0 {
-		b.WriteString(reach.String() + "\n")
+	} else if reachText.Len() > 0 {
+		b.WriteString(reachText.String() + "\n")
 	} else {
 		b.WriteString("See the host names below.\n\n")
 	}
@@ -290,5 +324,5 @@ func Exposure(g *graph, raw *facts.Snapshot) string {
 		"- Inside a cluster: NetworkPolicies, RBAC, Secrets, what a pod is allowed to do.\n" +
 		"- The applications themselves: authentication, authorization, vulnerabilities in code or dependencies.\n" +
 		"- Other clouds, other accounts and other regions than the ones scanned.\n")
-	return b.String()
+	return b.String(), review
 }

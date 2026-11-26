@@ -107,7 +107,7 @@
 | `pkg/redact` | gitleaks 기반 secret 마스킹 |
 | `pkg/enrich` | 유일한 LLM 사용처. CLI는 쓰지 않고 brioly Cloud가 씀: 컴포넌트별 설명, 개요, JD 초안. 글쓰기 규칙은 `guide.md`, 이전 답(`State`)을 받아 바뀐 부분만 수정, 온보딩 문서는 코드로 조립. 한 종류만 쓰는 옵션(`NoOnboarding`, `NoJobDescriptions`) |
 | `pkg/lifecycle` | 버전 지원 종료일 조회. 날짜 표는 바이너리에 넣지 않고 `https://brioly.io/lifecycle/v1/data.json`에서 받음(`Fetch`, 형식·날짜 검증). CLI는 스캔 전에 받고, 못 받으면 이유를 출력하고 종료(2026-11-26 결정). Cloud도 같은 주소를 읽음. `BRIOLY_LIFECYCLE_URL`로 주소를 바꿀 수 있음(폐쇄망 미러, 테스트). 표는 `scripts/update-lifecycle.sh`가 endoflife.date에서 만듦. 표에 없는 버전은 추측하지 않고 "모름". 얼마나 임박했는지는 스캔 시각 기준 |
-| `pkg/render` | 결정적 문서와 다이어그램, `[[fact-id]]` 인용 해석. 문서: `architecture.md`, `tech-stack.md`, `version-support.md`(버전 지원), `internet-exposure.md`(인터넷 노출 점검. 등급은 고정 규칙) |
+| `pkg/render` | 결정적 문서와 다이어그램, `[[fact-id]]` 인용 해석. 문서: `architecture.md`, `tech-stack.md`, `version-support.md`(버전 지원), `internet-exposure.md`(인터넷 노출 점검. 등급은 고정 규칙). `render.NewDiagrams`는 그림을 직접 그리는 쪽(brioly Cloud)을 위한 것: 뷰(시스템, 인터넷 노출, 클러스터별 워크로드)마다 상자의 위치와 선의 경로까지 고정 규칙으로 계산한 `DiagramLayout`과, 리소스별 속성 패널(`ResourcePanel`: structural·detail·label만, volatile 없음)을 줌. CLI가 쓰는 파일(Mermaid)은 여기서 나오지 않고 그대로임 |
 
 - 새 kind나 속성을 추가하면 `pkg/facts/kinds.go`에 등급을 선언합니다. 선언하지 않은 속성은 버려지고, 수집기 테스트의 `facts.Undeclared` 검사에서 걸립니다. 분류나 정규화를 바꾸면 `RegistryVersion`을 올립니다.
 - 테스트: `go test ./...`. 새 수집기는 "같은 입력이면 같은 해시", "배포(태그·revision 변경)로 해시가 바뀌지 않음", "환경변수 값이 결과에 남지 않음"을 테스트로 보장합니다.
