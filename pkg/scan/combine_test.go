@@ -1,10 +1,15 @@
 package scan
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/brioly/brioly/pkg/collect"
+	"github.com/brioly/brioly/pkg/diff"
 	"github.com/brioly/brioly/pkg/facts"
 )
 
@@ -160,5 +165,117 @@ func TestCleanKeepsWhatWasNotReadFromThePreviousSnapshot(t *testing.T) {
 	f, ok := failed.FactByID("k8s:prod/shop")
 	if !ok || f.Stale == "" {
 		t.Errorf("the workload that could not be read is gone or not marked: %+v", failed.Facts)
+	}
+}
+
+// Uploads are cleaned while scans run, in one process: Clean and Run at
+// once, many times over, with the race detector on. Before the rules were
+// loaded once per process and under a lock, this crashed with "concurrent
+// map read and map write" inside the secret detector's configuration.
+func TestCleanAndRunAtOnce(t *testing.T) {
+	one := func(i int) *facts.Snapshot {
+		s := &facts.Snapshot{ID: "local", Facts: []facts.Fact{{
+			ID: fmt.Sprintf("k8s:prod:workload:default/api-%d", i), Kind: "k8s.workload", Name: "api",
+			Attributes: map[string]any{"workload_kind": "Deployment", "namespace": "default", "note": "password=hunter2hunter2hunter2"},
+			Source:     facts.Source{Connector: "kubernetes", Scope: "prod"}, Ref: facts.SourceRef{Type: "k8s", Value: "default/api"},
+		}}}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := range 32 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := Clean(one(i), nil); err != nil {
+				errs <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := Run(context.Background(), Options{Collected: []collect.Result{{Facts: one(i).Facts}}, ID: "s"}); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+// A stored snapshot that was read before the kind registry changed keeps
+// saying so when it is put together again. Otherwise the pieces of an old
+// snapshot would be stamped as read by this version, and the next
+// comparison with a fresh scan would list the reclassification as changes
+// instead of refusing to compare.
+func TestPuttingAnOldSnapshotTogetherKeepsItsClassification(t *testing.T) {
+	old := func(id string, fs ...facts.Fact) *facts.Snapshot {
+		s := snap(t, id, fs, nil)
+		// As a snapshot stored by the version before reads: one registry
+		// version back.
+		cur, before := fmt.Sprintf(":%d:", facts.RegistryVersion), fmt.Sprintf(":%d:", facts.RegistryVersion-1)
+		if !strings.Contains(s.BaselineKey, cur) {
+			t.Fatalf("baseline key %q", s.BaselineKey)
+		}
+		s.BaselineKey = strings.Replace(s.BaselineKey, cur, before, 1)
+		return s
+	}
+	k8s := facts.Fact{ID: "k8s:prod:workload:default/api", Kind: "k8s.workload", Name: "api", Attributes: map[string]any{"workload_kind": "Deployment", "namespace": "default"},
+		Source: facts.Source{Connector: "kubernetes", Scope: "prod"}, Ref: facts.SourceRef{Type: "k8s", Value: "default/api"}}
+	fresh := snap(t, "fresh", []facts.Fact{vpc("main")}, nil)
+	stored := old("stored", vpc("main"), k8s)
+
+	// Without: the old key stays, and a comparison with a fresh scan says
+	// "cannot be compared" and lists nothing.
+	left, _, err := Without(stored, "kubernetes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left.BaselineKey != stored.BaselineKey {
+		t.Errorf("Without re-keyed an old snapshot: %q, was %q", left.BaselineKey, stored.BaselineKey)
+	}
+	if res := diff.Compare(left, fresh); !res.Rebaselined || len(res.Events) != 0 {
+		t.Errorf("an old snapshot with a source taken out, against a fresh scan: rebaselined %v, %d events", res.Rebaselined, len(res.Events))
+	}
+	// A current one is not touched.
+	if now, _, _ := Without(snap(t, "now", []facts.Fact{vpc("main"), k8s}, nil), "kubernetes"); now.BaselineKey != fresh.BaselineKey {
+		t.Errorf("Without changed a current snapshot's key: %q", now.BaselineKey)
+	}
+
+	// Combine: old with old keeps the old key (the two compare with each
+	// other as before); old with current is neither.
+	sent := old("sent", k8s)
+	both, err := Combine(old("cloud", vpc("main")), sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if both.BaselineKey != sent.BaselineKey {
+		t.Errorf("two old snapshots combined: %q, want their own key %q", both.BaselineKey, sent.BaselineKey)
+	}
+	mixed, err := Combine(fresh, sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mixed.BaselineKey == fresh.BaselineKey || mixed.BaselineKey == sent.BaselineKey {
+		t.Errorf("a current and an old snapshot combined pass for one of the two: %q", mixed.BaselineKey)
+	}
+	// Each step of an upgrade is a new baseline, not a list of changes:
+	// both old, then Cloud's own scan current, then the CLI's too.
+	current, err := Combine(fresh, snap(t, "sent-now", []facts.Fact{k8s}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.BaselineKey != fresh.BaselineKey {
+		t.Errorf("two current snapshots combined: %q", current.BaselineKey)
+	}
+	for name, pair := range map[string][2]*facts.Snapshot{"old to mixed": {both, mixed}, "mixed to current": {mixed, current}} {
+		if res := diff.Compare(pair[0], pair[1]); !res.Rebaselined || len(res.Events) != 0 {
+			t.Errorf("%s: rebaselined %v, %d events", name, res.Rebaselined, len(res.Events))
+		}
 	}
 }

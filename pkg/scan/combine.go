@@ -46,7 +46,7 @@ func Clean(snap, previous *facts.Snapshot) (int, error) {
 	if snap == nil {
 		return 0, fmt.Errorf("%w: it is empty", ErrForeign)
 	}
-	r, err := redact.New()
+	r, err := redact.Shared()
 	if err != nil {
 		return 0, fmt.Errorf("load secret rules: %w", err)
 	}
@@ -303,7 +303,39 @@ func Combine(primary, extra *facts.Snapshot) (*facts.Snapshot, error) {
 	if err := rebuild(out); err != nil {
 		return nil, err
 	}
+	keepClassification(out, p.BaselineKey, x.BaselineKey)
 	return out, nil
+}
+
+// keepClassification is called on a snapshot that was put together again
+// from stored ones (Combine, Without). Putting it together finalizes it,
+// and Finalize stamps what it finalizes with the baseline key of this
+// version of the code, whatever version read the content. A stored
+// snapshot read before the kind registry changed would then pass for one
+// read after it, and the next comparison with a fresh scan would report the
+// reclassification as changes to every resource it touched, instead of
+// saying that the two cannot be compared.
+//
+// So the result keeps saying how its content was classified: the key of
+// the snapshot it was made from when that differs from this version's, and
+// for two snapshots with different keys, both. Neither equals the key of a
+// fresh scan, which is what a comparison looks at.
+func keepClassification(out *facts.Snapshot, from ...string) {
+	now := out.BaselineKey
+	var old []string
+	same := true
+	for _, key := range from {
+		if key == "" {
+			continue // never finalized by a version that recorded one
+		}
+		same = same && key == now
+		if len(old) == 0 || old[len(old)-1] != key {
+			old = append(old, key)
+		}
+	}
+	if !same {
+		out.BaselineKey = strings.Join(old, "+")
+	}
 }
 
 // clone copies a snapshot deeply, so that nothing done to the copy reaches
@@ -380,9 +412,15 @@ func Without(snap *facts.Snapshot, connectors ...string) (out *facts.Snapshot, r
 	out.Edges = edges
 	// Notes are attached to components and facts by a components file, which
 	// a stored snapshot is rebuilt without (as in Clean and Combine).
+	original := snap.BaselineKey
+	if out.RegistryKey != "" {
+		// The key named a components file that is not applied here.
+		original = ""
+	}
 	out.RegistryKey = ""
 	if err := rebuild(out); err != nil {
 		return nil, 0, err
 	}
+	keepClassification(out, original)
 	return out, removed, nil
 }

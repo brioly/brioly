@@ -118,7 +118,7 @@ func Run(ctx context.Context, opts Options) (*facts.Snapshot, error) {
 		return nil, fmt.Errorf("scan interrupted; documents were not changed: %w", err)
 	}
 
-	r, err := redact.New()
+	r, err := redact.Shared()
 	if err != nil {
 		return nil, fmt.Errorf("load secret rules: %w", err)
 	}
