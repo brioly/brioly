@@ -202,6 +202,12 @@ func (d *differ) emit(e Event) { d.events = append(d.events, e) }
 func (d *differ) coverage() {
 	for key, was := range d.old.coverage {
 		now, ok := d.new.coverage[key]
+		// A place a collector finds by listing (a Cloudflare account or
+		// zone) that the new scan has no entry for was not read at all:
+		// what was in it is neither known to be there nor to be gone.
+		if !ok && was == facts.CoverageComplete && strings.HasPrefix(key, "cloudflare\x00") && strings.Split(key, "\x00")[2] != "" {
+			now, ok = "not listed", true
+		}
 		if ok && was == facts.CoverageComplete && now != facts.CoverageComplete {
 			parts := strings.Split(key, "\x00")
 			d.emit(Event{Type: CoverageChanged, Severity: Medium, RuleID: "coverage-lost", Subject: strings.Join(parts, "/"), Kind: parts[3],

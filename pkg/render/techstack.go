@@ -101,6 +101,8 @@ var serviceNames = map[string]string{
 	"aws.autoscaling.group": "EC2 Auto Scaling", "aws.elbv2.load_balancer": "Elastic Load Balancing",
 	"aws.ecs.service": "ECS", "aws.eks.cluster": "EKS", "aws.lambda.function": "Lambda", "aws.rds.cluster": "RDS / Aurora",
 	"aws.rds.instance": "RDS",
+	"cloudflare.zone":  "Cloudflare DNS and proxy", "cloudflare.worker": "Cloudflare Workers", "cloudflare.pages_project": "Cloudflare Pages",
+	"cloudflare.tunnel": "Cloudflare Tunnel", "cloudflare.load_balancer": "Cloudflare Load Balancing",
 }
 
 func cloudSummary(g *graph) string {

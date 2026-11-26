@@ -172,6 +172,8 @@ func Architecture(g *graph, diagram string) string {
 		}
 	}
 
+	writeCloudflare(&b, g)
+
 	// Ingresses no load balancer fact serves are entry points of their own.
 	var ingresses []facts.Fact
 	for _, in := range g.kind("k8s.ingress") {
@@ -637,7 +639,7 @@ func byPriority(rules []facts.Fact) []facts.Fact {
 
 // platforms are the places a component can run, in the order their tables
 // are written.
-var platforms = []string{"AWS", "Code"}
+var platforms = []string{"AWS", "Cloudflare", "Code"}
 
 // platformKubernetes is where a component runs whose resource is a
 // Kubernetes workload; such components have no table of their own.
@@ -652,6 +654,8 @@ func platform(anchor facts.Fact) string {
 		return platformKubernetes
 	case strings.HasPrefix(anchor.Kind, "code."):
 		return "Code"
+	case strings.HasPrefix(anchor.Kind, "cloudflare."):
+		return "Cloudflare"
 	default:
 		return "AWS"
 	}

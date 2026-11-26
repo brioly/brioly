@@ -226,3 +226,50 @@ sources:
 		t.Errorf("warnings = %v", cfg.Warnings)
 	}
 }
+
+func TestCloudflareSource(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(dir, "brioly.yaml")
+	writeFile(t, path, "sources:\n  cloudflare:\n    api_token: ${CLOUDFLARE_API_TOKEN}\n")
+
+	// Cloudflare alone is a source, and the token comes from the variable.
+	t.Setenv("CLOUDFLARE_API_TOKEN", " made-up-token\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sources.Cloudflare == nil || cfg.Sources.Cloudflare.APIToken != "made-up-token" {
+		t.Errorf("cloudflare = %+v", cfg.Sources.Cloudflare)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "made-up-token") {
+			t.Errorf("a warning carries the token: %s", w)
+		}
+	}
+
+	// Without the variable the scan does not start, and the error says
+	// what to set without printing anything.
+	os.Unsetenv("CLOUDFLARE_API_TOKEN")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "sources.cloudflare.api_token is empty") {
+		t.Errorf("err = %v", err)
+	}
+
+	// A token written into the file works, with a warning that does not
+	// repeat it.
+	writeFile(t, path, "sources:\n  cloudflare:\n    api_token: literal-made-up-token\n")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := false
+	for _, w := range cfg.Warnings {
+		warned = warned || strings.Contains(w, "holds the token itself")
+		if strings.Contains(w, "literal-made-up-token") {
+			t.Errorf("a warning carries the token: %s", w)
+		}
+	}
+	if !warned {
+		t.Errorf("no warning for a token in the file: %v", cfg.Warnings)
+	}
+}

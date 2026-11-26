@@ -16,6 +16,7 @@ import (
 
 	"github.com/brioly/brioly/pkg/collect"
 	awscollect "github.com/brioly/brioly/pkg/collect/aws"
+	"github.com/brioly/brioly/pkg/collect/cloudflare"
 	"github.com/brioly/brioly/pkg/collect/code"
 	"github.com/brioly/brioly/pkg/collect/kube"
 	"github.com/brioly/brioly/pkg/components"
@@ -28,6 +29,7 @@ type Options struct {
 	Repos      []Repo
 	AWS        *AWS
 	Kubernetes *Kubernetes
+	Cloudflare *Cloudflare
 
 	// Registry is the components file: names, owners, merges, notes and
 	// resources to ignore. Nil means none.
@@ -75,6 +77,16 @@ type Kubernetes struct {
 	Kubeconfig        string   // file(s) whose contexts are read
 	Contexts          []string // empty means the current context
 	ExcludeNamespaces []string // nil means kube.SystemNamespaces
+}
+
+// Cloudflare reads what an API token can see of Cloudflare.
+type Cloudflare struct {
+	// Token is the API token. It is sent to the Cloudflare API only, and
+	// is not in the snapshot, in a log or in an error.
+	Token string
+	// BaseURL replaces the address of the Cloudflare API (tests). It must
+	// be https or a loopback address.
+	BaseURL string
 }
 
 // Run scans the sources and returns a finalized snapshot with secrets
@@ -158,7 +170,9 @@ func Run(ctx context.Context, opts Options) (*facts.Snapshot, error) {
 }
 
 // collectAll runs the collectors in order: repositories, the cloud account,
-// then the clusters, which link to what the cloud scan found.
+// then the clusters, which link to what the cloud scan found, then
+// Cloudflare (its links to the rest are derived afterwards, by package
+// components).
 func collectAll(ctx context.Context, opts Options, logf func(string, ...any)) (*facts.Snapshot, error) {
 	var res collect.Result
 	for _, repo := range opts.Repos {
@@ -210,6 +224,26 @@ func collectAll(ctx context.Context, opts Options, logf func(string, ...any)) (*
 				res.Merge(readCluster(ctx, cluster, kopts))
 			}
 		}
+	}
+	if c := opts.Cloudflare; c != nil {
+		client, err := cloudflare.NewClient(c.BaseURL, c.Token)
+		if err != nil {
+			return nil, err
+		}
+		logf("scanning Cloudflare")
+		r := cloudflare.Collect(ctx, client, cloudflare.Options{})
+		// A token without a permission does not stop the scan: say what
+		// was left unread, so that it is not only in the documents.
+		for _, cov := range r.Coverage {
+			if cov.Status != facts.CoverageComplete {
+				where := ""
+				if cov.Region != "" && cov.Region != facts.AnyRegion {
+					where = " in " + cov.Region
+				}
+				logf("warning: Cloudflare: %s%s was not read in full (%s): %s", cov.Kind, where, cov.Status, cov.Detail)
+			}
+		}
+		res.Merge(r)
 	}
 	return &facts.Snapshot{Facts: res.Facts, Edges: res.Edges, Coverage: res.Coverage}, nil
 }

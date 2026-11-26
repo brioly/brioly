@@ -146,6 +146,56 @@ var Kinds = map[string]Kind{
 		Volatile:   []string{"image_refs"},
 		Anchor:     true,
 	},
+
+	// ---- Cloudflare ----
+	// Read from the Cloudflare API (connector "cloudflare"). Nothing that
+	// changes on a deploy is kept at all: no modification times, version or
+	// deployment IDs, etags.
+	"cloudflare.zone": {
+		// ssl_mode is how Cloudflare connects to origins ("flexible" is
+		// plain HTTP); the three settings are absent when zone settings
+		// could not be read.
+		// active says Cloudflare serves the zone (its status is "active"):
+		// a pending or moved zone has its name servers elsewhere.
+		Structural: []string{"zone_type", "active", "paused", "ssl_mode", "always_use_https", "min_tls_version"},
+		Detail:     []string{"plan"},
+		Volatile:   []string{"status"},
+		Anchor:     true,
+	},
+	// One fact per zone, name and type: the records of a name are a set.
+	// targets holds the content of address-like records only (A, AAAA,
+	// CNAME, MX, NS); the content of TXT and every other type is never kept.
+	"cloudflare.dns_record": {
+		Structural: []string{"zone", "record_type", "proxied", "targets"},
+		Detail:     []string{"ttl", "record_count"},
+	},
+	"cloudflare.worker": {
+		// routes are the hosts of the Worker's routes, without their paths.
+		// bindings are "type:name" of what the Worker is bound to (KV, D1,
+		// R2, queues, other Workers); variables and secrets are names only.
+		Structural: []string{"routes", "domains", "bindings"},
+		Detail:     []string{"env_keys", "secret_keys", "compatibility_date"},
+		Anchor:     true,
+	},
+	"cloudflare.pages_project": {
+		Structural: []string{"subdomain", "domains", "production_branch", "repository"},
+		Detail:     []string{"env_keys"},
+		Anchor:     true,
+	},
+	"cloudflare.tunnel": {
+		// ingress is "host name -> service" in the order the tunnel
+		// evaluates it; it is absent when the tunnel is configured on the
+		// machine that runs it.
+		Structural: []string{"config_source", "ingress"},
+		Detail:     []string{"tunnel_id"},
+		Volatile:   []string{"status"},
+		Anchor:     true,
+	},
+	"cloudflare.load_balancer": {
+		Structural: []string{"zone", "proxied", "enabled", "steering_policy", "pools", "fallback_pool"},
+		Anchor:     true,
+	},
+	"cloudflare.lb_pool": {Structural: []string{"enabled", "origins"}},
 }
 
 // DefaultLabelAllow lists the tag keys kept as labels (structural) by

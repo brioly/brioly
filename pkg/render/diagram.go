@@ -16,7 +16,13 @@ var diagramKinds = map[string]string{
 	"aws.elbv2.load_balancer": "lb", "aws.ecs.service": "svc", "aws.lambda.function": "fn",
 	"aws.autoscaling.group": "svc", "aws.ec2.instance": "svc", "aws.rds.cluster": "db",
 	"aws.rds.instance": "db", "aws.eks.cluster": "svc", "k8s.cluster": "svc",
+	"cloudflare.zone": "lb", "cloudflare.load_balancer": "lb", "cloudflare.tunnel": "lb",
+	"cloudflare.worker": "fn", "cloudflare.pages_project": "svc",
 }
+
+// cloudflareArea is the key of the diagram area that holds what runs on
+// Cloudflare. It sorts before every VPC.
+const cloudflareArea = "\x00cloudflare"
 
 // SystemDiagram is the system diagram as data: the boxes and lines Diagram
 // draws, for a reader that draws the picture itself. brioly Cloud uses it to
@@ -28,15 +34,16 @@ var diagramKinds = map[string]string{
 // for a quoted Mermaid label, the way Diagram writes it; IDs are Mermaid
 // node IDs.
 type SystemDiagram struct {
-	// Internet is drawn when a load balancer faces the internet; its node ID
-	// is "internet".
+	// Internet is drawn when a load balancer faces the internet or something
+	// is served through Cloudflare; its node ID is "internet".
 	Internet bool          `json:"internet"`
 	Areas    []DiagramArea `json:"areas"`
 	// Links are sorted and unique.
 	Links []DiagramLink `json:"links"`
 }
 
-// DiagramArea is a VPC, or, with an empty ID, what is outside any VPC.
+// DiagramArea is a VPC, Cloudflare, or, with an empty ID, what is outside
+// both.
 type DiagramArea struct {
 	ID    string        `json:"id"`
 	Label string        `json:"label"`
@@ -175,6 +182,9 @@ func diagramOf(g *graph) *SystemDiagram {
 				continue // nodes are drawn as their EKS cluster
 			}
 		}
+		if f.Kind == "cloudflare.zone" && !servesHosts(g, f) {
+			continue // a zone of mail and text records only is not part of the request flow
+		}
 		nodes = append(nodes, f)
 	}
 	if len(nodes) == 0 {
@@ -225,6 +235,9 @@ func diagramOf(g *graph) *SystemDiagram {
 		if v, ok := g.vpcOf(n.ID); ok {
 			key = v.ID
 		}
+		if strings.HasPrefix(n.Kind, "cloudflare.") {
+			key = cloudflareArea
+		}
 		if _, seen := byVPC[key]; !seen {
 			vpcIDs = append(vpcIDs, key)
 		}
@@ -240,7 +253,11 @@ func diagramOf(g *graph) *SystemDiagram {
 	}
 	for _, vpcID := range vpcIDs {
 		area := DiagramArea{}
-		if vpcID != "" {
+		switch vpcID {
+		case "":
+		case cloudflareArea:
+			area.ID, area.Label = nodeID(vpcID), "Cloudflare"
+		default:
 			area.ID, area.Label = nodeID(vpcID), "VPC "+label(displayName(g.byID[vpcID]))
 		}
 		group := byVPC[vpcID]
@@ -307,6 +324,12 @@ func diagramOf(g *graph) *SystemDiagram {
 	for _, n := range nodes {
 		drawn[n.ID] = true
 	}
+	for _, l := range cloudflareLinks(g, drawn) {
+		if l.from == "internet" {
+			d.Internet = true
+		}
+		links = append(links, link(l))
+	}
 	for _, e := range g.snap.Edges {
 		if e.Type != facts.EdgeDependsOn || !drawn[e.From] {
 			continue
@@ -354,6 +377,16 @@ func shortKind(f facts.Fact) string {
 	case "k8s.workload":
 		// Only the kind: the box of its cluster already says Kubernetes.
 		return strAttr(f, "workload_kind")
+	case "cloudflare.zone":
+		return "DNS zone"
+	case "cloudflare.load_balancer":
+		return "Load balancer"
+	case "cloudflare.tunnel":
+		return "Tunnel"
+	case "cloudflare.worker":
+		return "Worker"
+	case "cloudflare.pages_project":
+		return "Pages"
 	default:
 		return "EC2 " + strAttr(f, "instance_type")
 	}

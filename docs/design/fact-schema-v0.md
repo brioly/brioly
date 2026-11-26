@@ -367,3 +367,42 @@ kubeconfig의 API 서버가 AWS 스캔이 찾은 EKS 클러스터와 같으면 �
 - **기본 제외**: `kube-system`, `kube-public`, `kube-node-lease` 네임스페이스와 `default/kubernetes` Service.
 - **실패 처리**: 401·403은 coverage `denied`, 일부 목록만 실패하면 `partial`. 이전 스캔에서 읽은 사실은 `CarryForward`로 유지됩니다.
 - 클러스터를 읽지 않으면 이전처럼 로드 밸런서 태그와 매니페스트로 추론합니다.
+
+## Cloudflare 읽기 (2026-11-26 추가)
+
+Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, brioly.yaml의 `sources.cloudflare.api_token`에는 `${CLOUDFLARE_API_TOKEN}` 같은 참조만 적음). GET 요청만 보내고, 토큰은 `Authorization` 헤더 말고는 어디에도 남지 않습니다(사실, source_ref, 로그, 오류 메시지). 리다이렉트는 따라가지 않습니다.
+
+| 읽는 것 | 사실 | 구조 속성 | detail | volatile |
+|---|---|---|---|---|
+| Zone, zone 설정 | `cloudflare.zone` | 종류, 활성 여부(상태가 `active`인지), 일시 중지 여부, SSL 모드, Always Use HTTPS, 최소 TLS 버전 | 플랜 | 상태 |
+| DNS 레코드 | `cloudflare.dns_record` | zone, 타입, 프록시 여부, 가리키는 곳(A·AAAA·CNAME·MX·NS만) | TTL, 레코드 수 | |
+| Worker, 라우트, 커스텀 도메인, 바인딩 | `cloudflare.worker` | 라우트의 호스트(경로는 버리고 "일부 경로"라고만 표시), 도메인, 바인딩(`종류:이름`) | 변수 이름, secret 이름, compatibility date | |
+| Pages 프로젝트 | `cloudflare.pages_project` | pages.dev 주소, 커스텀 도메인, 운영 브랜치, 레포 | 환경변수 이름 | |
+| Tunnel, 설정 | `cloudflare.tunnel` | 설정 위치, ingress(`호스트 -> 스킴://호스트:포트`, 평가 순서 유지) | 터널 ID | 상태 |
+| 로드 밸런서 | `cloudflare.load_balancer` | zone, 프록시·활성 여부, 분배 정책, 기본 풀과 fallback 풀의 이름(순서 유지. 지역별 풀과 규칙의 풀은 읽지 않음) | | |
+| 풀 | `cloudflare.lb_pool` | 활성 여부, origin 주소 | | |
+
+- **읽을 수 있는 것과 저장하는 것은 다릅니다.** Worker 설정과 Pages 프로젝트는 평문 변수의 값을 돌려줍니다. 응답에서 이름만 디코딩하고 값은 Go 값으로 만들지도 않습니다(변수와 secret의 **이름**은 저장합니다). TXT를 비롯한 다른 타입의 레코드 내용, 레코드의 comment와 tag, 터널 ingress의 path와 origin 설정, 서비스 주소에 적힌 자격 증명·경로·쿼리, 풀 origin의 Host 헤더는 저장하지 않습니다.
+- **요청 자체를 보내지 않는 것**: Worker 코드와 secret, KV·R2·D1 내용, Pages 배포와 빌드 로그, 터널 토큰, 풀의 monitor, WAF·방화벽·rate limiting 규칙, Access, API 토큰, 인증서, 로그.
+- **배포로 바뀌는 값은 아예 수집하지 않습니다**(수정 시각, etag, 버전·배포 ID, 레코드 ID). 그래서 배포는 어떤 해시도 바꾸지 않습니다.
+- **레코드 사실의 단위는 (zone, 이름, 타입)입니다.** 같은 이름의 A 레코드 여러 개는 한 사실의 `targets`입니다. 모든 레코드가 프록시될 때만 `proxied`가 true입니다.
+- **ID에는 모두 계정 ID가 들어갑니다**(같은 이름의 zone이 두 계정에 있을 수 있음. 도메인을 옮기는 동안 한쪽은 pending): `cloudflare:zone/<계정 ID>/<zone>`, `cloudflare:dns/<계정 ID>/<zone>/<TYPE>/<이름>`, `cloudflare:lb/<계정 ID>/<zone>/<호스트>`, `cloudflare:worker/<계정 ID>/<이름>`, `…:pages/…`, `…:tunnel/<계정 ID>/<터널 ID>`, `…:pool/<계정 ID>/<풀 ID>`.
+- **Scope는 고정값 `api.cloudflare.com`이고, Region이 읽은 위치입니다**: zone 사실은 빈 값, DNS 레코드와 로드 밸런서는 `<계정 ID>/<zone 이름>`, Worker·Pages·Tunnel·풀은 계정 ID. coverage도 그 단위로 기록하므로 한 zone을 읽지 못해도 다른 zone의 변경과 삭제는 그대로 잡힙니다.
+- **zone이나 계정 목록 자체를 읽지 못하면**(만료된 토큰) 어느 zone을 못 읽었는지 이름을 댈 수 없습니다. 이때는 Region이 `*`(`facts.AnyRegion`)인 coverage를 남기고, `CarryForward`는 이것을 그 kind에 대해 **자기 coverage 항목이 없는** region에 적용합니다(이번에 읽은 region은 자기 항목으로 판단). 목록 조회가 일시적으로 실패해 일부 계정을 방문하지 못했을 수 있을 때도 계정 단위 kind에 `*` 항목을 남깁니다. 이전 스캔에서 `complete`였던 zone·계정이 이번 스캔에 항목조차 없으면(토큰이 그 계정을 더 이상 보지 못함) `diff`가 `coverage-lost`로 알립니다. zone도 계정도 하나도 보이지 않는 응답(권한이 좁혀진 토큰의 빈 목록)도 "전부 삭제"가 아니라 읽지 못한 것으로 처리합니다.
+- **사실의 속성을 채우는 조회**(zone 설정, Worker 라우트·커스텀 도메인·바인딩, 터널 설정, 계정 목록)는 coverage kind가 따로 있습니다(`cloudflare.zone_settings`, `cloudflare.worker_route`, `cloudflare.worker_domain`, `cloudflare.worker_settings`, `cloudflare.tunnel_configuration`, `cloudflare.account`). 다시 물어도 같은 답이 올 조회(401·403·404를 비롯한 4xx. 408·429 제외)는 그 kind만 `denied`가 되고 사실 자체는 `complete`로 남습니다. 그래야 "항상 없는 권한" 하나 때문에 그 영역의 변경 이벤트가 모두 꺼지지 않습니다(`diff`는 `partial`·`error`가 있는 영역의 이벤트를 만들지 않음). 일시적인 실패(5xx, 네트워크)일 때만 사실의 kind도 `partial`이 되어 이전 값이 채워집니다. 목록 조회도 같습니다: 4xx는 `denied`, 그 밖은 `error`. Worker 라우트는 zone마다 읽지만 계정의 Worker에 붙으므로, 한 zone의 라우트를 읽지 못하면 그 계정 Worker 전체의 `routes`를 비웁니다.
+- **실패 처리**: 읽지 못한 값(설정, 라우트, 바인딩, ingress, 풀 이름)은 빈 값이나 대체 문구가 아니라 속성 자체를 비웁니다. 429는 `Retry-After`만큼 기다렸다가 세 번까지 다시 보냅니다. 오류 메시지에는 요청 경로의 틀(`/zones/{zone}/dns_records`)과 HTTP 상태, Cloudflare 오류 코드만 남기고 Cloudflare가 보낸 문구는 버립니다(문구에 요청 주소가 들어 있을 수 있음).
+- **뒤에 있는 것과의 연결은 수집기가 만들지 않습니다.** `pkg/components`의 규칙이 스냅샷에 저장된 호스트 이름으로 만듭니다(`rule:*`). 양쪽을 서로 다른 스캔이 읽은 경우(DNS는 CLI, 로드 밸런서는 Cloud)에도 합친 스냅샷에서 연결되게 하기 위해서입니다.
+
+| 관계 | 조건 | derivation |
+|---|---|---|
+| 레코드 `exposes` 로드 밸런서·Service·Ingress | CNAME 대상이 그 리소스의 DNS 이름과 같음(`dualstack.` 접두사 허용) | observed (`rule:host-match`) |
+| 레코드 `exposes` Tunnel·Pages·Worker | 대상이 `<터널 ID>.cfargotunnel.com` 또는 pages.dev 주소, 이름이 커스텀 도메인, (프록시된 레코드만) 이름이 Worker 라우트의 호스트와 정확히 같음 | observed |
+| 레코드 `exposes` Ingress | 대상이나 커스텀 도메인으로 연결되지 않았고(Worker 라우트만 걸린 경우 포함), 레코드 이름이 클러스터에서 읽은 Ingress의 host와 같음 | inferred (`rule:ingress-host`) |
+| Tunnel `routes_to` 리소스 | ingress의 서비스 호스트가 알려진 엔드포인트와 같음 | observed |
+| Tunnel `routes_to` Service | 서비스 호스트가 `이름.네임스페이스.svc…`이고 그런 Service를 가진 클러스터가 하나뿐 | inferred (`rule:service-name`) |
+| 풀 `routes_to` 리소스 | origin 주소가 알려진 엔드포인트와 같음 | observed |
+
+- `_`로 시작하는 라벨이 있는 이름(인증서·도메인 검증, DKIM)은 호스트 이름으로 보지 않습니다.
+- **인터넷 노출 점검**: 호스트 이름마다 "Cloudflare proxy"인지 "DNS only"인지(일시 중지된 zone은 모두 DNS only, 활성이 아닌 zone은 "Cloudflare가 서비스하지 않음")와, origin에 Cloudflare를 거치지 않고 닿을 수 있는지를 스캔이 본 범위에서만 적습니다. 프록시된 레코드만으로는 origin이 직접 접근을 막는다고 쓰지 않습니다. Worker 라우트가 걸린 이름이라도 레코드가 가리키는 주소가 따로 있으면 그 주소를 origin으로 함께 적습니다. origin이 AWS 로드 밸런서이고 보안 그룹에 **리스너 포트를 덮는 TCP 규칙**이 `0.0.0.0/0`으로 열려 있으면 Medium(ICMP나 다른 포트는 해당 없음), SSL 모드 `off`·`flexible`은 Medium, 프록시로 설정된 레코드가 있는데 zone이 일시 중지면 Medium, `full`은 Low입니다. Cloudflare를 스캔하지 않은 스냅샷의 문서에는 Cloudflare에 관한 문장이 들어가지 않습니다.
+- **변경 중요도**: 프록시 해제(레코드), zone 일시 중지, zone이 활성에서 비활성으로 바뀜은 high(`cloudflare-proxy-disabled`), SSL 모드가 `off`·`flexible`로 바뀌면 medium(`origin-encryption-weakened`).
+- **범위 밖**: WAF·rate limiting 규칙(규칙식에 헤더 값이 들어갈 수 있고, 정직한 요약 규칙을 아직 정하지 못함), Access(정책의 의미를 해석해야 함), workers.dev 주소, R2·KV·D1, A 레코드의 IP와 AWS 리소스의 연결(AWS 수집기가 공인 IP를 저장하지 않음), CloudFront·API Gateway·S3 웹사이트(AWS 수집기에 아직 없음).

@@ -52,6 +52,16 @@ sources:
   #   eks: true                        # also every EKS cluster the AWS scan finds, with the AWS identity (no kubeconfig needed)
   #   exclude_namespaces: [kube-system, kube-public, kube-node-lease]
 
+  # Optional: Cloudflare. Zones and their DNS records (and whether each goes
+  # through Cloudflare's proxy), Workers, Pages projects, Tunnels and load
+  # balancers, read with an API token that has read permissions only: the
+  # list is in the README, section "Cloudflare". A permission the token
+  # lacks is reported as a part that was not read. Keep the token out of
+  # this file: set CLOUDFLARE_API_TOKEN in your environment or in
+  # ~/.brioly/credentials.
+  # cloudflare:
+  #   api_token: ${CLOUDFLARE_API_TOKEN}
+
   # Local checkouts. Set name to override the repository name.
   repos:
     - path: ../api
