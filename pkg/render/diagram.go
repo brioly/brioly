@@ -25,9 +25,9 @@ var diagramKinds = map[string]string{
 const cloudflareArea = "\x00cloudflare"
 
 // SystemDiagram is the system diagram as data: the boxes and lines Diagram
-// draws, for a reader that draws the picture itself. brioly Cloud uses it to
-// open and close the namespaces of a Kubernetes cluster; the files the CLI
-// writes always show everything.
+// draws, for a reader that draws the picture itself; the files the CLI
+// writes always show everything. The views brioly Cloud draws
+// (NewDiagrams) are made from it.
 //
 // It is made from the fact graph only, so the same snapshot always gives
 // the same value. Every text in it (Name, Kind, Label) is already made safe
@@ -48,6 +48,8 @@ type DiagramArea struct {
 	ID    string        `json:"id"`
 	Label string        `json:"label"`
 	Nodes []DiagramNode `json:"nodes"`
+
+	fact string // the VPC's fact ID; empty for Cloudflare and for what is outside both
 }
 
 // DiagramNode is one resource. A cluster whose workloads are known has
@@ -75,6 +77,8 @@ type DiagramNamespace struct {
 	ID        string        `json:"id"`
 	Name      string        `json:"name"`
 	Workloads []DiagramNode `json:"workloads"`
+
+	name string // the namespace as collected, not made safe for Mermaid
 }
 
 // DiagramLink is a line between two node IDs: dotted when inferred or a
@@ -83,6 +87,10 @@ type DiagramLink struct {
 	From   string `json:"from"`
 	To     string `json:"to"`
 	Dotted bool   `json:"dotted,omitempty"`
+
+	// dependency: the line stands only for "depends on", not for a path
+	// requests take.
+	dependency bool
 }
 
 // DiagramOf returns the system diagram of a snapshot as data, or nil when
@@ -258,7 +266,7 @@ func diagramOf(g *graph) *SystemDiagram {
 		case cloudflareArea:
 			area.ID, area.Label = nodeID(vpcID), "Cloudflare"
 		default:
-			area.ID, area.Label = nodeID(vpcID), "VPC "+label(displayName(g.byID[vpcID]))
+			area.ID, area.Label, area.fact = nodeID(vpcID), "VPC "+label(displayName(g.byID[vpcID])), vpcID
 		}
 		group := byVPC[vpcID]
 		sort.Slice(group, func(i, j int) bool { return group[i].ID < group[j].ID })
@@ -283,7 +291,7 @@ func diagramOf(g *graph) *SystemDiagram {
 			for _, ns := range names {
 				ws := byNS[ns]
 				sort.Slice(ws, func(i, j int) bool { return ws[i].fact < ws[j].fact })
-				dn.Namespaces = append(dn.Namespaces, DiagramNamespace{ID: nodeID(n.ID + "\x00namespace\x00" + ns), Name: label(ns), Workloads: ws})
+				dn.Namespaces = append(dn.Namespaces, DiagramNamespace{ID: nodeID(n.ID + "\x00namespace\x00" + ns), Name: label(ns), Workloads: ws, name: ns})
 			}
 			area.Nodes = append(area.Nodes, dn)
 		}
@@ -294,6 +302,7 @@ func diagramOf(g *graph) *SystemDiagram {
 		from, arrow, to string
 	}
 	var links []link
+	dependency := map[link]bool{} // lines that are only ever a dependency
 	for _, lb := range g.kind("aws.elbv2.load_balancer") {
 		if strAttr(lb, "scheme") == "internet-facing" {
 			links = append(links, link{"internet", "-->", nodeID(lb.ID)})
@@ -330,6 +339,10 @@ func diagramOf(g *graph) *SystemDiagram {
 		}
 		links = append(links, link(l))
 	}
+	path := map[link]bool{}
+	for _, l := range links {
+		path[l] = true
+	}
 	for _, e := range g.snap.Edges {
 		if e.Type != facts.EdgeDependsOn || !drawn[e.From] {
 			continue
@@ -342,7 +355,9 @@ func diagramOf(g *graph) *SystemDiagram {
 		}
 		for _, to := range tos {
 			if drawn[to] && to != e.From {
-				links = append(links, link{nodeID(e.From), "-.->", nodeID(to)})
+				l := link{nodeID(e.From), "-.->", nodeID(to)}
+				links = append(links, l)
+				dependency[l] = !path[l]
 			}
 		}
 	}
@@ -353,7 +368,7 @@ func diagramOf(g *graph) *SystemDiagram {
 		if i > 0 && l == links[i-1] {
 			continue
 		}
-		d.Links = append(d.Links, DiagramLink{From: l.from, To: l.to, Dotted: l.arrow != "-->"})
+		d.Links = append(d.Links, DiagramLink{From: l.from, To: l.to, Dotted: l.arrow != "-->", dependency: dependency[l]})
 	}
 	return d
 }

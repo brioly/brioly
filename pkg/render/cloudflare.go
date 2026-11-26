@@ -367,7 +367,7 @@ func directReach(g *graph, rawByID map[string]facts.Fact, origin facts.Fact) (te
 // cloudflareExposure renders the Cloudflare part of the exposure review:
 // lines for "What the internet can reach" and the table of host names. It
 // reports findings through add.
-func cloudflareExposure(g *graph, rawByID map[string]facts.Fact, add func(level, what string, f facts.Fact)) (reach, hosts string) {
+func cloudflareExposure(g *graph, rawByID map[string]facts.Fact, add func(level, what string, f facts.Fact), reached func(f facts.Fact, how string)) (reach, hosts string) {
 	var r, h strings.Builder
 	bypass := map[string]bool{} // load balancers already reported as reachable around Cloudflare
 	for _, z := range g.kind("cloudflare.zone") {
@@ -467,6 +467,7 @@ func cloudflareExposure(g *graph, rawByID map[string]facts.Fact, add func(level,
 			pools = "sends traffic to its default pools: " + orNone(listAttr(lb, "pools"))
 		}
 		fmt.Fprintf(&r, "- Cloudflare load balancer **%s** answers %s; %s — %s\n", displayName(lb), how, pools, evidence(lb))
+		reached(lb, "Cloudflare load balancer")
 	}
 	var rawZones []facts.Fact
 	for _, z := range g.kind("cloudflare.zone") {
@@ -484,11 +485,13 @@ func cloudflareExposure(g *graph, rawByID map[string]facts.Fact, add func(level,
 		}
 		if len(at) > 0 {
 			fmt.Fprintf(&r, "- Worker **%s** answers on %s — %s\n", displayName(w), codeList(at), evidence(w))
+			reached(w, "Worker answering on its domains and routes")
 		}
 	}
 	for _, p := range g.kind("cloudflare.pages_project") {
 		at := append([]string{strAttr(p, "subdomain")}, listAttr(p, "domains")...)
 		fmt.Fprintf(&r, "- Pages project **%s** is served at %s — %s\n", displayName(p), codeList(at), evidence(p))
+		reached(p, "Pages project with a public address")
 	}
 	for _, t := range g.kind("cloudflare.tunnel") {
 		var names []string
@@ -499,6 +502,7 @@ func cloudflareExposure(g *graph, rawByID map[string]facts.Fact, add func(level,
 		}
 		if len(names) > 0 {
 			fmt.Fprintf(&r, "- Tunnel **%s** publishes %s from inside the origin's network — %s\n", displayName(t), codeList(names), evidence(t))
+			reached(t, "Tunnel publishing host names")
 		}
 	}
 	return r.String(), h.String()
