@@ -17,6 +17,12 @@ import (
 // DefaultBaseURL is the Cloudflare API (v4).
 const DefaultBaseURL = "https://api.cloudflare.com/client/v4"
 
+// The three errors below are answers of the Cloudflare API itself: they
+// are returned only when the body is the API's own error envelope
+// ({"success": false, "errors": [{"code": ...}]}). A 4xx from anything
+// else on the way (a block page, a proxy, an empty body) is ErrNotAPI: it
+// says nothing about the token or the resource.
+
 // ErrDenied is returned when the API refuses the token (401, 403): the
 // token is wrong, or it lacks the permission the request needs.
 var ErrDenied = errors.New("cloudflare: access denied")
@@ -27,6 +33,13 @@ var ErrNotFound = errors.New("cloudflare: not found")
 // ErrRejected is returned for any other answer that says the request
 // itself is not acceptable (4xx): asking again will give the same answer.
 var ErrRejected = errors.New("cloudflare: request not accepted")
+
+// ErrNotAPI is returned for a 4xx whose body is not the API's error
+// envelope: something between here and the API answered (an edge block, a
+// proxy, a captive portal), or the API answered in a way it does not
+// document. It is a failure that may pass, like an outage: nothing can be
+// concluded from it about the token, a permission or what exists.
+var ErrNotAPI = errors.New("cloudflare: the answer did not come from the Cloudflare API")
 
 // API reads from the Cloudflare API. path is the path below the base
 // address, with its query. what names the request in errors, with
@@ -64,10 +77,29 @@ type Client struct {
 	wait func(ctx context.Context, d time.Duration) error
 }
 
+// ClientOptions adjusts a Client.
+type ClientOptions struct {
+	// NoProxy sends requests straight to the API, whatever HTTPS_PROXY and
+	// its relatives say. For a caller that sends someone else's token (a
+	// service): a proxy named by the process's environment must not see it.
+	// The CLI leaves it false: its user's proxy is the user's own.
+	NoProxy bool
+}
+
 // NewClient returns a client for the API at base (DefaultBaseURL when
 // empty). The address must be https, or a loopback address for tests: the
 // token is sent to it.
-func NewClient(base, token string) (*Client, error) {
+func NewClient(base, token string, opts ...ClientOptions) (*Client, error) {
+	var o ClientOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	var transport http.RoundTripper
+	if o.NoProxy {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.Proxy = nil
+		transport = t
+	}
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("cloudflare: no API token")
 	}
@@ -82,7 +114,8 @@ func NewClient(base, token string) (*Client, error) {
 		base:  strings.TrimRight(base, "/"),
 		token: strings.TrimSpace(token),
 		http: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 			// A redirect is not followed: the token goes to the address
 			// that was configured, or nowhere.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -154,12 +187,20 @@ func (c *Client) get(ctx context.Context, what, path string) (Response, time.Dur
 		Info   PageInfo        `json:"result_info"`
 	}
 	parseErr := json.Unmarshal(body, &env)
-	reason := resp.Status
+	// The reason is made here from the status code. The status line's own
+	// text is whatever the other end wrote, and is not repeated.
+	reason := strconv.Itoa(resp.StatusCode)
+	if text := http.StatusText(resp.StatusCode); text != "" {
+		reason += " " + text
+	}
+	// The API's own refusal: its envelope, saying it failed, with a code.
+	fromAPI := parseErr == nil && env.Success != nil && !*env.Success && len(env.Errors) > 0 && env.Errors[0].Code != 0
 	// Cloudflare's error code is kept, its message is not: a message can
 	// repeat the address of the request, identifiers included.
-	if parseErr == nil && len(env.Errors) > 0 {
+	if fromAPI {
 		reason += fmt.Sprintf(" (Cloudflare error code %d)", env.Errors[0].Code)
 	}
+	client4xx := resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		wait := 5 * time.Second
@@ -170,11 +211,13 @@ func (c *Client) get(ctx context.Context, what, path string) (Response, time.Dur
 			wait = 30 * time.Second
 		}
 		return Response{}, wait, fmt.Errorf("cloudflare: GET %s: %s", what, reason)
+	case client4xx && !fromAPI:
+		return Response{}, 0, fmt.Errorf("%w: GET %s: %s without the API's error body", ErrNotAPI, what, reason)
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return Response{}, 0, fmt.Errorf("%w: GET %s: %s", ErrDenied, what, reason)
 	case resp.StatusCode == http.StatusNotFound:
 		return Response{}, 0, fmt.Errorf("%w: GET %s: %s", ErrNotFound, what, reason)
-	case resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusRequestTimeout:
+	case client4xx:
 		return Response{}, 0, fmt.Errorf("%w: GET %s: %s", ErrRejected, what, reason)
 	case resp.StatusCode != http.StatusOK:
 		return Response{}, 0, fmt.Errorf("cloudflare: GET %s: %s", what, reason)

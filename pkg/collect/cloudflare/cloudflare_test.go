@@ -696,3 +696,40 @@ func TestRunTakesWhatTheCallerCollected(t *testing.T) {
 		t.Errorf("%d facts after a scan that read nothing, %d before", len(again.Facts), len(snap.Facts))
 	}
 }
+
+// A refusal that is not the API's (a block page in front of it) is not
+// "denied": nothing is known about the token or a permission. The coverage
+// says the answer was not the API's, as a failure that may pass, and what
+// the scan before saw is kept, for everything or for the one part.
+func TestABlockPageIsNotARefusalByTheAPI(t *testing.T) {
+	prev := finalized(t, collectFrom(t, &fake{}))
+	for name, f := range map[string]*fake{
+		"everything blocked": {block: []string{"/"}},
+		"one part blocked":   {block: []string{"/dns_records"}},
+	} {
+		cur := finalized(t, collectFrom(t, f))
+		said := false
+		for _, c := range cur.Coverage {
+			if c.Status == facts.CoverageDenied {
+				t.Errorf("%s: %s in %q is recorded as denied: %s", name, c.Kind, c.Region, c.Detail)
+			}
+			if strings.Contains(c.Detail, "blocked") {
+				t.Errorf("%s: the coverage repeats the page: %s", name, c.Detail)
+			}
+			said = said || (c.Status == facts.CoverageError && strings.Contains(c.Detail, "did not come from the Cloudflare API"))
+		}
+		if !said {
+			t.Errorf("%s: no coverage entry says the answer was not the API's: %+v", name, cur.Coverage)
+		}
+		cur.CarryForward(prev)
+		if err := cur.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		if len(cur.Facts) != len(prev.Facts) {
+			t.Errorf("%s: %d facts after carrying forward, %d before", name, len(cur.Facts), len(prev.Facts))
+		}
+		if f := byID(t, cur, "cloudflare:dns/"+accountID+"/example.com/CNAME/api.example.com"); f.Stale != facts.StaleNotRead {
+			t.Errorf("%s: a record behind the block page is %q, want kept and marked not read", name, f.Stale)
+		}
+	}
+}

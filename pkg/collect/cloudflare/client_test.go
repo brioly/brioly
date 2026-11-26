@@ -2,6 +2,9 @@ package cloudflare
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,5 +148,138 @@ func TestListStopsAtTheEnd(t *testing.T) {
 	}
 	if calls.Load() != 1+3+1 {
 		t.Errorf("%d requests, want 5", calls.Load())
+	}
+}
+
+// A 4xx is the API's refusal only when the body is the API's own error
+// envelope. A block page, a proxy's answer or an empty body says nothing
+// about the token or the resource: it is ErrNotAPI, a failure that may pass.
+// The first three bodies are what the real API answers a token it does not
+// know (checked on 2026-11-26 with a made-up token).
+func TestOnlyTheAPIsOwnAnswerIsARefusal(t *testing.T) {
+	const html = `<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body>Sorry, you have been blocked</body></html>`
+	cases := []struct {
+		name   string
+		status int
+		ctype  string
+		body   string
+		want   error
+	}{
+		{"verify, unknown token", 401, "application/json", `{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}],"messages":[],"result":null}`, ErrDenied},
+		{"list, unknown token", 403, "application/json", `{"success":false,"errors":[{"code":9109,"message":"Invalid access token"}],"messages":[],"result":null}`, ErrDenied},
+		{"list, no permission", 403, "application/json", `{"success":false,"errors":[{"code":9109,"message":"Unauthorized to access requested resource"}],"messages":[],"result":null}`, ErrDenied},
+		{"no such thing", 404, "application/json", `{"success":false,"errors":[{"code":7003,"message":"Could not route to /client/v4/x"}],"result":null}`, ErrNotFound},
+		{"bad request", 400, "application/json", `{"success":false,"errors":[{"code":6003,"message":"Invalid request headers"}],"result":null}`, ErrRejected},
+		{"block page", 403, "text/html", html, ErrNotAPI},
+		{"block page, 401", 401, "text/html", html, ErrNotAPI},
+		{"plain 400", 400, "text/plain", "Bad Request", ErrNotAPI},
+		{"plain 404", 404, "text/plain", "404 page not found", ErrNotAPI},
+		{"empty 403", 403, "", "", ErrNotAPI},
+		{"JSON that is not the envelope", 403, "application/json", `{"error":"forbidden"}`, ErrNotAPI},
+		{"an envelope without an error", 403, "application/json", `{"success":false,"errors":[]}`, ErrNotAPI},
+		{"an envelope that says success", 403, "application/json", `{"success":true,"errors":[{"code":1000}],"result":[]}`, ErrNotAPI},
+		{"an error without a code", 401, "application/json", `{"success":false,"errors":[{"message":"no"}]}`, ErrNotAPI},
+	}
+	var now atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := cases[now.Load()]
+		if c.ctype != "" {
+			w.Header().Set("Content-Type", c.ctype)
+		}
+		w.WriteHeader(c.status)
+		w.Write([]byte(c.body))
+	}))
+	defer srv.Close()
+	c, err := NewClient(srv.URL, clientToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, tc := range cases {
+		now.Store(int32(i))
+		_, err := c.Get(context.Background(), "/zones", "/zones")
+		for _, kind := range []error{ErrDenied, ErrNotFound, ErrRejected, ErrNotAPI} {
+			if got := errors.Is(err, kind); got != (kind == tc.want) {
+				t.Errorf("%s (%d): errors.Is(%v) = %v; the error is %v", tc.name, tc.status, kind, got, err)
+			}
+		}
+		// Only the API's own refusals stay the same until someone changes
+		// something. The rest may pass, and earlier facts are kept.
+		if stable(err) != (tc.want != ErrNotAPI) {
+			t.Errorf("%s: stable = %v", tc.name, stable(err))
+		}
+		if strings.Contains(err.Error(), "blocked") || strings.Contains(err.Error(), "Invalid") {
+			t.Errorf("%s: the error repeats the body: %v", tc.name, err)
+		}
+	}
+}
+
+// The status line's text is the other end's to write. It is not repeated:
+// an upstream that echoes the Authorization header there gets none of it
+// into an error.
+func TestTheStatusLinesTextIsNotRepeated(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				n, _ := conn.Read(buf)
+				auth := ""
+				for _, line := range strings.Split(string(buf[:n]), "\r\n") {
+					if strings.HasPrefix(line, "Authorization: Bearer ") {
+						auth = strings.TrimPrefix(line, "Authorization: Bearer ")
+					}
+				}
+				status := "403"
+				if strings.Contains(string(buf[:n]), "GET /five") {
+					status = "502"
+				}
+				body := `{"success":false,"errors":[{"code":9109,"message":"x"}]}`
+				// Part of the token, as a proxy that logs its input might.
+				fmt.Fprintf(conn, "HTTP/1.1 %s Denied for %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+					status, auth[4:], len(body), body)
+			}()
+		}
+	}()
+	c, err := NewClient("http://"+ln.Addr().String(), clientToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/four", "/five"} {
+		_, err := c.Get(context.Background(), path, path)
+		if err == nil {
+			t.Fatalf("%s: no error", path)
+		}
+		if strings.Contains(err.Error(), clientToken[4:]) || strings.Contains(err.Error(), clientToken[8:16]) || strings.Contains(err.Error(), "Denied for") {
+			t.Errorf("%s: the error repeats the status line: %v", path, err)
+		}
+	}
+	if _, err := c.Get(context.Background(), "/four", "/four"); !strings.Contains(err.Error(), "403 Forbidden (Cloudflare error code 9109)") {
+		t.Errorf("the reason is not made from the status code: %v", err)
+	}
+}
+
+// A caller that sends someone else's token does not let the environment
+// name a proxy for it.
+func TestNoProxy(t *testing.T) {
+	c, err := NewClient("", clientToken, ClientOptions{NoProxy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Errorf("with NoProxy the transport is %T and may still use a proxy", c.http.Transport)
+	}
+	c, _ = NewClient("", clientToken)
+	if c.http.Transport != nil {
+		t.Error("without NoProxy the default transport, which honours the environment, is not used")
 	}
 }
