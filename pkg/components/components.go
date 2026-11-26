@@ -52,6 +52,7 @@ func workloadKey(f facts.Fact) string {
 var workloadKinds = map[string]bool{
 	"aws.ecs.service": true, "aws.lambda.function": true, "aws.autoscaling.group": true,
 	"aws.ec2.instance": true, "k8s.workload": true,
+	"cloudflare.worker": true, "cloudflare.pages_project": true,
 }
 
 // index is a lookup view of a snapshot.
@@ -105,6 +106,7 @@ func (ix *index) filter(ids []string, kind string) []string {
 // s.Annotations. It may add built_from edges. Call s.Finalize afterwards.
 // The returned warnings are meant for the user.
 func Build(s *facts.Snapshot, reg *Registry) []string {
+	linkHosts(s)
 	ix := newIndex(s)
 	var warnings []string
 	comps := map[string]*facts.Component{} // by anchor fact ID
@@ -297,6 +299,26 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 		}
 	}
 
+	// Cloudflare: a zone with the records that name hosts, a tunnel, and a
+	// load balancer with its pools are entry points. Mail, delegation,
+	// text and validation records are not members: they lead to no workload.
+	for _, f := range s.Facts {
+		switch f.Kind {
+		case "cloudflare.zone":
+			c := add(f, RoleNetworkEdge)
+			for _, r := range ix.targets(f.ID, facts.EdgeContains, "cloudflare.dns_record") {
+				if HostRecord(ix.byID[r]) {
+					c.Members = append(c.Members, r)
+				}
+			}
+		case "cloudflare.tunnel":
+			add(f, RoleNetworkEdge)
+		case "cloudflare.load_balancer":
+			c := add(f, RoleNetworkEdge)
+			c.Members = append(c.Members, ix.targets(f.ID, facts.EdgeRoutesTo, "cloudflare.lb_pool")...)
+		}
+	}
+
 	// An Ingress no load balancer fact serves (an in-cluster controller, or
 	// a load balancer outside the scan) is an entry point of its own.
 	for _, f := range s.Facts {
@@ -385,8 +407,12 @@ func workloadNames(ix *index, c *facts.Component) []string {
 	for _, m := range c.Members {
 		f := ix.byID[m]
 		switch f.Kind {
-		case "aws.ecs.service", "aws.lambda.function", "k8s.workload":
+		case "aws.ecs.service", "aws.lambda.function", "k8s.workload", "cloudflare.worker", "cloudflare.pages_project":
 			names[strings.ToLower(f.Name)] = true
+		}
+		// A Pages project names the repository it is built from.
+		if repo, _ := f.Attributes["repository"].(string); repo != "" {
+			names[strings.ToLower(path.Base(repo))] = true
 		}
 		for _, img := range stringList(f.Attributes["image_repositories"]) {
 			names[strings.ToLower(path.Base(img))] = true

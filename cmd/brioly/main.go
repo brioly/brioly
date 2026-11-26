@@ -181,8 +181,19 @@ func snapshot(ctx context.Context, cfg *config.Config, stderr io.Writer) (*facts
 	if k := cfg.Sources.K8s; k != nil {
 		opts.Kubernetes = &scan.Kubernetes{EKS: k.EKS, Kubeconfig: k.Kubeconfig, Contexts: k.Contexts, ExcludeNamespaces: k.ExcludeNamespaces}
 	}
+	if c := cfg.Sources.Cloudflare; c != nil {
+		opts.Cloudflare = &scan.Cloudflare{Token: c.APIToken, BaseURL: os.Getenv(cloudflareURLEnv)}
+		if opts.Cloudflare.BaseURL != "" {
+			fmt.Fprintf(stderr, "note: reading Cloudflare from the address in %s, not from the Cloudflare API\n", cloudflareURLEnv)
+		}
+	}
 	return scan.Run(ctx, opts)
 }
+
+// cloudflareURLEnv replaces the address of the Cloudflare API, for tests
+// against a stand-in. The API token is sent to that address, so it must be
+// https or a loopback address.
+const cloudflareURLEnv = "BRIOLY_CLOUDFLARE_API_URL"
 
 func saveHistory(dir, outputDir string, snap *facts.Snapshot) error {
 	raw, err := os.ReadFile(filepath.Join(outputDir, render.FactsFile))

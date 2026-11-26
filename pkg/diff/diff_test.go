@@ -313,3 +313,50 @@ func TestRiskyFromTheStartAndReplicaScaling(t *testing.T) {
 		t.Error("replica scaling changed the database component hash")
 	}
 }
+
+func TestCloudflareRules(t *testing.T) {
+	src := facts.Source{Connector: "cloudflare", Scope: "api.cloudflare.com"}
+	build := func(proxied, paused bool, ssl string) *facts.Snapshot {
+		mk := func(id, kind, name string, attrs map[string]any) facts.Fact {
+			f := facts.NewObserved(id, kind, name, src, facts.SourceRef{Type: facts.RefCloudflare, Value: name}, time.Now())
+			f.Attributes = attrs
+			return f
+		}
+		s := &facts.Snapshot{Facts: []facts.Fact{
+			mk("cloudflare:zone/example.com", "cloudflare.zone", "example.com", map[string]any{"zone_type": "full", "paused": paused, "ssl_mode": ssl}),
+			mk("cloudflare:dns/example.com/A/api.example.com", "cloudflare.dns_record", "api.example.com",
+				map[string]any{"zone": "example.com", "record_type": "A", "proxied": proxied, "targets": []string{"192.0.2.1"}}),
+		}}
+		for _, kind := range []string{"cloudflare.zone", "cloudflare.dns_record"} {
+			s.Coverage = append(s.Coverage, facts.Coverage{Connector: src.Connector, Scope: src.Scope, Kind: kind, Status: facts.CoverageComplete})
+		}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(s)
+		var out facts.Snapshot
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return &out
+	}
+	r := Compare(build(true, false, "strict"), build(false, true, "flexible"))
+	rec, _ := find(r, StructuralChanged, "cloudflare:dns/example.com/A/api.example.com")
+	if rec.Severity != High || rec.RuleID != "cloudflare-proxy-disabled" {
+		t.Errorf("turning the proxy off: %+v", rec)
+	}
+	zone, _ := find(r, StructuralChanged, "cloudflare:zone/example.com")
+	if zone.Severity != High || zone.RuleID != "cloudflare-proxy-disabled" {
+		t.Errorf("pausing a zone: %+v", zone)
+	}
+	r = Compare(build(true, false, "strict"), build(true, false, "flexible"))
+	if zone, _ := find(r, StructuralChanged, "cloudflare:zone/example.com"); zone.Severity != Medium || zone.RuleID != "origin-encryption-weakened" {
+		t.Errorf("weakening the SSL mode: %+v", zone)
+	}
+	// Turning the proxy on, or tightening the mode, is a plain change.
+	for _, e := range Compare(build(false, true, "flexible"), build(true, false, "strict")).Events {
+		if e.Severity == High || e.Severity == Medium {
+			t.Errorf("a change for the better was rated %s: %+v", e.Severity, e)
+		}
+	}
+}

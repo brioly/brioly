@@ -72,6 +72,8 @@ type Sources struct {
 	// K8s is the Kubernetes source (sources.k8s).
 	K8s   *Kubernetes `yaml:"k8s"`
 	Repos []Repo      `yaml:"repos"`
+	// Cloudflare is the Cloudflare source (sources.cloudflare).
+	Cloudflare *Cloudflare `yaml:"cloudflare"`
 	// OldKubernetes is the earlier spelling of sources.k8s. It still
 	// loads, with a warning, and is moved to K8s.
 	OldKubernetes *Kubernetes `yaml:"kubernetes"`
@@ -97,6 +99,15 @@ type Kubernetes struct {
 	// ExcludeNamespaces replaces the default list of skipped namespaces
 	// (kube-system, kube-public, kube-node-lease).
 	ExcludeNamespaces []string `yaml:"exclude_namespaces"`
+}
+
+// Cloudflare reads what an API token can see of Cloudflare: zones, DNS
+// records, Workers, Pages projects, Tunnels and load balancers.
+type Cloudflare struct {
+	// APIToken is a Cloudflare API token with read permissions only (see
+	// the README for the list). Write a reference (${CLOUDFLARE_API_TOKEN}),
+	// not the value.
+	APIToken string `yaml:"api_token"`
 }
 
 // AWS selects the AWS account to scan through the standard credential chain.
@@ -137,6 +148,11 @@ func Load(path string) (*Config, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	// A token written into the file itself is used, but said: this file is
+	// meant to be committed.
+	if n := lookupNode(&root, "sources", "cloudflare", "api_token"); n != nil && n.Value != "" && !varRef.MatchString(n.Value) {
+		warnings = append(warnings, "sources.cloudflare.api_token in brioly.yaml holds the token itself: keep the token in an environment variable (or ~/.brioly/credentials) and write api_token: ${CLOUDFLARE_API_TOKEN}")
 	}
 	var missing []string
 	expandNode(&root, func(name string) string {
@@ -244,8 +260,15 @@ func (c *Config) validate() error {
 	if k != nil && len(k.Contexts) > 0 && k.Kubeconfig == "" {
 		return errors.New("brioly.yaml: sources.k8s.contexts needs a kubeconfig: set sources.k8s.kubeconfig to the kubeconfig file")
 	}
-	if c.Sources.AWS == nil && len(c.Sources.Repos) == 0 && (k == nil || k.Kubeconfig == "") {
-		return errors.New("brioly.yaml: no sources configured (sources.aws, sources.repos, or sources.k8s.kubeconfig)")
+	cf := c.Sources.Cloudflare
+	if cf != nil {
+		cf.APIToken = strings.TrimSpace(cf.APIToken)
+		if cf.APIToken == "" {
+			return errors.New("brioly.yaml: sources.cloudflare.api_token is empty: write api_token: ${CLOUDFLARE_API_TOKEN} and set that variable to a read-only Cloudflare API token")
+		}
+	}
+	if c.Sources.AWS == nil && len(c.Sources.Repos) == 0 && (k == nil || k.Kubeconfig == "") && cf == nil {
+		return errors.New("brioly.yaml: no sources configured (sources.aws, sources.repos, sources.k8s.kubeconfig, or sources.cloudflare)")
 	}
 	if c.Sources.AWS != nil && len(c.Sources.AWS.Regions) == 0 {
 		return errors.New("brioly.yaml: sources.aws.regions must list at least one region")
@@ -259,6 +282,32 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// lookupNode returns the value node at a path of mapping keys, or nil.
+func lookupNode(n *yaml.Node, path ...string) *yaml.Node {
+	if n.Kind == yaml.DocumentNode && len(n.Content) > 0 {
+		n = n.Content[0]
+	}
+	for _, key := range path {
+		if n.Kind != yaml.MappingNode {
+			return nil
+		}
+		var next *yaml.Node
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == key {
+				next = n.Content[i+1]
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		n = next
+	}
+	if n.Kind != yaml.ScalarNode {
+		return nil
+	}
+	return n
 }
 
 // expandNode replaces ${VAR} references in every scalar value of the tree.

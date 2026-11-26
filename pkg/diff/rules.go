@@ -12,6 +12,7 @@ import (
 var significantKinds = map[string]bool{
 	"aws.ecs.service": true, "aws.lambda.function": true, "aws.autoscaling.group": true, "aws.ec2.instance": true,
 	"aws.rds.cluster": true, "aws.rds.instance": true, "aws.elbv2.load_balancer": true, "aws.ec2.vpc": true, "k8s.workload": true, "k8s.ingress": true, "k8s.cluster": true,
+	"cloudflare.zone": true, "cloudflare.worker": true, "cloudflare.pages_project": true, "cloudflare.tunnel": true, "cloudflare.load_balancer": true,
 }
 
 func isDevDependency(f facts.Fact) bool {
@@ -71,6 +72,17 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 			raise(High, "ingress-open-to-internet")
 		case f.Kind == "aws.elbv2.load_balancer" && c.Attribute == "scheme" && c.After == "internet-facing":
 			raise(High, "load-balancer-made-public")
+		case f.Kind == "cloudflare.dns_record" && c.Attribute == "proxied" && c.Before == true && c.After == false:
+			// The origin's address is published again and requests no
+			// longer pass Cloudflare.
+			raise(High, "cloudflare-proxy-disabled")
+		case f.Kind == "cloudflare.zone" && c.Attribute == "paused" && c.Before == false && c.After == true:
+			raise(High, "cloudflare-proxy-disabled")
+		case f.Kind == "cloudflare.zone" && c.Attribute == "active" && c.Before == true && c.After == false:
+			// The zone is no longer served by Cloudflare at all.
+			raise(High, "cloudflare-proxy-disabled")
+		case f.Kind == "cloudflare.zone" && c.Attribute == "ssl_mode" && (c.After == "off" || c.After == "flexible") && c.Before != "off" && c.Before != "flexible" && c.Before != nil:
+			raise(Medium, "origin-encryption-weakened")
 		case c.Attribute == "engine" || c.Attribute == "engine_major" || c.Attribute == "runtime":
 			raise(Medium, "engine-or-runtime-changed")
 		case f.Kind == "code.dependency" && c.Attribute == "major":

@@ -11,7 +11,8 @@ import (
 // request that updates it) say they were deleted.
 //
 // For every kind whose coverage in s is not complete, in the same account
-// and region:
+// and region (an entry for AnyRegion counts for every region that has no
+// entry of its own):
 //   - a fact prev has and s lacks is copied and marked StaleNotRead;
 //   - a fact both have gets the attributes and details only prev has, and is
 //     marked StalePartly when any were filled (a partial read, such as tags that
@@ -37,8 +38,18 @@ func (s *Snapshot) CarryForward(prev *Snapshot) (staleFacts, staleEdges int) {
 	if len(incomplete) == 0 {
 		return 0, 0
 	}
+	// An entry for AnyRegion speaks for the regions that have no entry of
+	// their own: a region this scan did read is judged by its own entry.
+	hasEntry := map[scope]bool{}
+	for _, c := range s.Coverage {
+		hasEntry[scope{c.Connector, c.Scope, c.Region, c.Kind}] = true
+	}
 	unread := func(f Fact) bool {
-		return incomplete[scope{f.Source.Connector, f.Source.Scope, f.Source.Region, f.Kind}]
+		own := scope{f.Source.Connector, f.Source.Scope, f.Source.Region, f.Kind}
+		if hasEntry[own] {
+			return incomplete[own]
+		}
+		return incomplete[scope{f.Source.Connector, f.Source.Scope, AnyRegion, f.Kind}]
 	}
 
 	index := make(map[string]int, len(s.Facts))

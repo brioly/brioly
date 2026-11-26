@@ -22,6 +22,9 @@ const (
 	RefURL  = "url"
 	// RefKubernetes points at an object in a cluster: cluster/namespace/Kind/name.
 	RefKubernetes = "kubernetes"
+	// RefCloudflare points at something in a Cloudflare account, by name:
+	// zones/example.com/dns_records/CNAME/api.example.com.
+	RefCloudflare = "cloudflare"
 )
 
 // Coverage statuses. Only CoverageComplete allows a missing fact to be treated
@@ -33,6 +36,13 @@ const (
 	CoverageError    = "error"
 	CoverageSkipped  = "skipped"
 )
+
+// AnyRegion is the Region of a coverage entry that speaks for every region
+// of its connector and scope. A collector whose regions are found by
+// listing (the zones of a DNS provider) uses it when the listing itself
+// failed: it cannot name the regions it did not read. Such an entry is
+// never complete.
+const AnyRegion = "*"
 
 // Values of Fact.Stale.
 const (
