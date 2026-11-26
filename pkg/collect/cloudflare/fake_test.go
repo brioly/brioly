@@ -54,6 +54,10 @@ type fake struct {
 	// secondAccount adds another account that has a zone and a Worker of
 	// the same names as the first, the zone still pending there.
 	secondAccount bool
+	// block answers 403 with an HTML page, not the API's error body, for
+	// every path that contains one of these: something in between (an
+	// edge rule, a proxy) refused the request, not the API.
+	block []string
 	// empty answers every list with nothing, as for a token that was
 	// narrowed until it sees no zone and no account.
 	empty bool
@@ -246,6 +250,14 @@ func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		fail(http.StatusMethodNotAllowed, 10405, "Method not allowed")
 		return
+	}
+	for _, b := range f.block {
+		if strings.Contains(r.URL.Path, b) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte("<html><title>Attention Required!</title><body>Sorry, you have been blocked</body></html>"))
+			return
+		}
 	}
 	if f.unauthorized || r.Header.Get("Authorization") != "Bearer "+testToken {
 		fail(http.StatusUnauthorized, 10000, "Authentication error")

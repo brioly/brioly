@@ -95,7 +95,7 @@
 | 경로 | 역할 |
 |---|---|
 | `cmd/brioly` | CLI (`generate`, `sync`, `components init`, `diff`, `replay`, `version`). 설정을 읽어 `pkg/scan`을 부르고 결과를 파일로 씀. 모델을 부르지 않음(`pkg/enrich`를 import하지 않음) |
-| `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. `scan.Clean`(밖에서 온 스냅샷을 다시 마스킹·재계산)과 `scan.Combine`(두 스냅샷을 하나로, 겹치면 앞의 것 우선)도 여기 있음. AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role) |
+| `pkg/scan` | 결정적 파이프라인 전체: 수집 → 마스킹 → 읽지 못한 부분 이어받기 → 컴포넌트 묶기. CLI와 Cloud가 같은 `scan.Run`을 씀. `scan.Clean`(밖에서 온 스냅샷을 다시 마스킹·재계산)과 `scan.Combine`(두 스냅샷을 하나로, 겹치면 앞의 것 우선)도 여기 있음. AWS 자격 증명은 `aws.Config`로 주입 가능(수임한 Role). 호출한 쪽이 직접 수집한 결과는 `Options.Collected`로 넣음(자격 증명을 `Run`에 넘기지 않는 호출자용. 마스킹·이어받기·컴포넌트는 똑같이 거침) |
 | `pkg/facts` | Fact·Edge·Component·Snapshot, kind 레지스트리(`kinds.go`: 속성 등급), 결정적 ID, structural·detail 해시, `Finalize` |
 | `pkg/components` | 앵커 기반 컴포넌트 묶기(규칙), `components.yaml` 레지스트리 |
 | `pkg/diff` | 스냅샷 비교, 변경 이벤트, severity 규칙, 속성 변동 집계 |
@@ -103,7 +103,7 @@
 | `pkg/collect/code` | 로컬 레포 수집기 |
 | `pkg/collect/aws` | AWS 수집기. 서비스별 좁은 인터페이스로 fake 테스트 가능. 찾은 EKS 클러스터와 엔드포인트(호스트 → 사실)를 다음 수집기에 넘김 |
 | `pkg/collect/kube` | Kubernetes 수집기(선택). 클러스터 API에서 워크로드·Service·Ingress만 GET으로 읽음. Secret·ConfigMap·파드는 읽지 않음. 의존성 없는 HTTP 클라이언트, 테스트는 가짜 API 서버 |
-| `pkg/collect/cloudflare` | Cloudflare 수집기(선택, `sources.cloudflare.api_token`). API 토큰으로 GET만 보냄: zone과 SSL 모드, DNS 레코드와 프록시 여부, Workers(라우트·커스텀 도메인·바인딩 이름), Pages, Tunnel과 라우트, 로드 밸런서와 풀. 변수 값·TXT 내용·터널 토큰은 저장하지 않고, WAF·Access는 읽지 않음. 의존성 없는 HTTP 클라이언트, 테스트는 가짜 API 서버. 뒤에 있는 것(AWS 로드 밸런서, Ingress)과의 연결은 수집기가 아니라 `pkg/components`의 규칙(`hosts.go`)이 호스트 이름으로 만듦 |
+| `pkg/collect/cloudflare` | Cloudflare 수집기(선택, `sources.cloudflare.api_token`). API 토큰으로 GET만 보냄: zone과 SSL 모드, DNS 레코드와 프록시 여부, Workers(라우트·커스텀 도메인·바인딩 이름), Pages, Tunnel과 라우트, 로드 밸런서와 풀. 변수 값·TXT 내용·터널 토큰은 저장하지 않고, WAF·Access는 읽지 않음. 의존성 없는 HTTP 클라이언트, 테스트는 가짜 API 서버. 토큰을 아예 쓰지 못한 호출자는 `cloudflare.Unread`로 "읽지 못함"을 남겨 이전 사실을 이어받음. 뒤에 있는 것(AWS 로드 밸런서, Ingress)과의 연결은 수집기가 아니라 `pkg/components`의 규칙(`hosts.go`)이 호스트 이름으로 만듦 |
 | `pkg/redact` | gitleaks 기반 secret 마스킹 |
 | `pkg/enrich` | 유일한 LLM 사용처. CLI는 쓰지 않고 brioly Cloud가 씀: 컴포넌트별 설명, 개요, JD 초안. 글쓰기 규칙은 `guide.md`, 이전 답(`State`)을 받아 바뀐 부분만 수정, 온보딩 문서는 코드로 조립. 한 종류만 쓰는 옵션(`NoOnboarding`, `NoJobDescriptions`) |
 | `pkg/lifecycle` | 버전 지원 종료일 조회. 날짜 표는 바이너리에 넣지 않고 `https://brioly.io/lifecycle/v1/data.json`에서 받음(`Fetch`, 형식·날짜 검증). CLI는 스캔 전에 받고, 못 받으면 이유를 출력하고 종료(2026-11-26 결정). Cloud도 같은 주소를 읽음. `BRIOLY_LIFECYCLE_URL`로 주소를 바꿀 수 있음(폐쇄망 미러, 테스트). 표는 `scripts/update-lifecycle.sh`가 endoflife.date에서 만듦. 표에 없는 버전은 추측하지 않고 "모름". 얼마나 임박했는지는 스캔 시각 기준 |

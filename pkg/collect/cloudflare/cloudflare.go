@@ -422,6 +422,42 @@ func Collect(ctx context.Context, api API, opts Options) collect.Result {
 	return s.res
 }
 
+// Unread is the result of a scan that could not use its API token at all:
+// the caller found the token refused, or could not get to it, before a
+// single request of Collect was made. It says of everything Collect reads
+// that it was not read, so that what an earlier scan saw is kept and marked
+// (facts.CarryForward) instead of counting as deleted.
+//
+// detail is shown in documents: it must not name anything that is not
+// already there. refused says the answer stays the same until someone
+// changes the token ("denied"); otherwise the failure may pass ("error").
+func Unread(detail string, refused bool) collect.Result {
+	status := facts.CoverageError
+	if refused {
+		status = facts.CoverageDenied
+	}
+	var res collect.Result
+	add := func(region, kind string) {
+		res.Coverage = append(res.Coverage, facts.Coverage{Connector: Connector, Scope: Scope, Region: region, Kind: kind, Status: status, Detail: detail})
+	}
+	// As Collect records it when neither the zones nor the accounts can be
+	// listed: zones have no region, everything else is in some zone or
+	// account this scan never learned of.
+	add("", coverAccounts)
+	add("", "cloudflare.zone")
+	for _, k := range append(append([]string{}, accountKinds...), zoneKinds...) {
+		add(AllRegions, k)
+	}
+	sort.Slice(res.Coverage, func(i, j int) bool {
+		a, b := res.Coverage[i], res.Coverage[j]
+		if a.Region != b.Region {
+			return a.Region < b.Region
+		}
+		return a.Kind < b.Kind
+	})
+	return res
+}
+
 func (s *scan) cover(k covKey) {
 	r := s.cov[k]
 	c := facts.Coverage{Connector: Connector, Scope: Scope, Region: k.region, Kind: k.kind, Status: facts.CoverageComplete}

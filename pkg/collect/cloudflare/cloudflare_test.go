@@ -613,3 +613,123 @@ func TestAccountsThatAreNotVisited(t *testing.T) {
 		t.Error("an account that is no longer read is not reported")
 	}
 }
+
+// A caller that could not use its token at all (brioly Cloud, when the
+// stored token is refused or cannot be opened) says so with Unread: every
+// fact of the scan before is kept and marked, none is reported as deleted,
+// and the reason given is what the coverage says.
+func TestUnreadKeepsEverything(t *testing.T) {
+	prev := finalized(t, collectFrom(t, &fake{secondAccount: true}))
+	for refused, status := range map[bool]string{true: facts.CoverageDenied, false: facts.CoverageError} {
+		cur := finalized(t, cloudflare.Unread("the stored API token was not accepted", refused))
+		if len(cur.Facts) != 0 || len(cur.Edges) != 0 {
+			t.Fatalf("Unread made %d facts and %d edges", len(cur.Facts), len(cur.Edges))
+		}
+		for _, c := range cur.Coverage {
+			if c.Connector != cloudflare.Connector || c.Scope != cloudflare.Scope || c.Status != status || c.Detail != "the stored API token was not accepted" {
+				t.Errorf("coverage %+v, want %s", c, status)
+			}
+		}
+		// An entry for every kind of fact, where a scan with a rejected
+		// token records one.
+		got := coverage(cur)
+		for _, kind := range cloudflare.Kinds {
+			region := cloudflare.AllRegions
+			if kind == "cloudflare.zone" {
+				region = ""
+			}
+			if _, ok := got[region+"|"+kind]; !ok {
+				t.Errorf("Unread lacks the coverage entry of %s", kind)
+			}
+		}
+		for _, e := range diff.Compare(prev, cur).Events {
+			if e.Type == diff.FactRemoved {
+				t.Errorf("%s is reported as deleted", e.Subject)
+			}
+		}
+		cur.CarryForward(prev)
+		if err := cur.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		if len(cur.Facts) != len(prev.Facts) {
+			t.Errorf("%d facts after carrying forward, %d before", len(cur.Facts), len(prev.Facts))
+		}
+		for _, f := range cur.Facts {
+			if f.Stale != facts.StaleNotRead {
+				t.Errorf("%s is %q, want kept and marked not read", f.ID, f.Stale)
+			}
+		}
+	}
+}
+
+// What a caller collected itself goes through Run like what Run collects:
+// it is in the snapshot with its relationships made by rule, secrets are
+// masked, and the token it was read with is nowhere.
+func TestRunTakesWhatTheCallerCollected(t *testing.T) {
+	read := collectFrom(t, &fake{})
+	snap, err := scan.Run(context.Background(), scan.Options{Collected: []collect.Result{read}, ID: "scan-1", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID(t, snap, "cloudflare:zone/"+accountID+"/example.com")
+	if len(snap.Components) == 0 {
+		t.Error("no components were built from what the caller collected")
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), testToken) {
+		t.Error("the snapshot holds the token")
+	}
+	for _, p := range planted {
+		if strings.Contains(string(raw), p) {
+			t.Errorf("the snapshot holds %s", p)
+		}
+	}
+	// And what could not be read is kept from the scan before.
+	again, err := scan.Run(context.Background(), scan.Options{Collected: []collect.Result{cloudflare.Unread("not read", true)}, Previous: snap, ID: "scan-2", Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Facts) != len(snap.Facts) {
+		t.Errorf("%d facts after a scan that read nothing, %d before", len(again.Facts), len(snap.Facts))
+	}
+}
+
+// A refusal that is not the API's (a block page in front of it) is not
+// "denied": nothing is known about the token or a permission. The coverage
+// says the answer was not the API's, as a failure that may pass, and what
+// the scan before saw is kept, for everything or for the one part.
+func TestABlockPageIsNotARefusalByTheAPI(t *testing.T) {
+	prev := finalized(t, collectFrom(t, &fake{}))
+	for name, f := range map[string]*fake{
+		"everything blocked": {block: []string{"/"}},
+		"one part blocked":   {block: []string{"/dns_records"}},
+	} {
+		cur := finalized(t, collectFrom(t, f))
+		said := false
+		for _, c := range cur.Coverage {
+			if c.Status == facts.CoverageDenied {
+				t.Errorf("%s: %s in %q is recorded as denied: %s", name, c.Kind, c.Region, c.Detail)
+			}
+			if strings.Contains(c.Detail, "blocked") {
+				t.Errorf("%s: the coverage repeats the page: %s", name, c.Detail)
+			}
+			said = said || (c.Status == facts.CoverageError && strings.Contains(c.Detail, "did not come from the Cloudflare API"))
+		}
+		if !said {
+			t.Errorf("%s: no coverage entry says the answer was not the API's: %+v", name, cur.Coverage)
+		}
+		cur.CarryForward(prev)
+		if err := cur.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		if len(cur.Facts) != len(prev.Facts) {
+			t.Errorf("%s: %d facts after carrying forward, %d before", name, len(cur.Facts), len(prev.Facts))
+		}
+		if f := byID(t, cur, "cloudflare:dns/"+accountID+"/example.com/CNAME/api.example.com"); f.Stale != facts.StaleNotRead {
+			t.Errorf("%s: a record behind the block page is %q, want kept and marked not read", name, f.Stale)
+		}
+	}
+}
