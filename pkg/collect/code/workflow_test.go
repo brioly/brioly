@@ -264,18 +264,80 @@ func TestRecognisers(t *testing.T) {
       - run: aws cloudformation deploy --stack-name shop-prod --template-file t.yaml --no-fail-on-empty-changeset
       - run: aws deploy create-deployment --application-name shop --deployment-group-name prod`,
 			[]string{"Deploy to CloudFormation stack shop-prod", "Deploy to CodeDeploy application shop"}},
+		{"other actions for the same targets", `
+      - uses: appleboy/lambda-action@v0.2.0
+        with: {function_name: thumbs, zip_file: fn.zip}
+      - uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with: {name: shop-network, template: net.yaml}
+      - uses: jakejarvis/s3-sync-action@master
+        env: {AWS_S3_BUCKET: acme-docs, SOURCE_DIR: public}
+      - uses: einaregilsson/beanstalk-deploy@v22
+        with: {application_name: shop, environment_name: shop-prod, version_label: "${{ github.sha }}"}
+      - uses: azure/k8s-deploy@v5
+        with:
+          namespace: prod
+          manifests: |
+            k8s/api.yaml
+            k8s/worker.yaml
+      - uses: google-github-actions/deploy-cloudrun@v2
+        with: {service: search, image: gcr.io/acme/search}
+      - uses: amondnet/vercel-action@v25
+        with: {working-directory: web}
+      - uses: peaceiris/actions-gh-pages@v4
+      - uses: JamesIves/github-pages-deploy-action@v4
+      - uses: goreleaser/goreleaser-action@v6`,
+			[]string{"Apply of Kubernetes manifests k8s/api.yaml", "Apply of Kubernetes manifests k8s/worker.yaml", "Deploy to Cloud Run service search",
+				"Deploy to CloudFormation stack shop-network", "Deploy to Elastic Beanstalk environment shop-prod", "Deploy to GitHub Pages",
+				"Deploy to Lambda function thumbs", "Deploy to S3 bucket acme-docs", "Deploy with Vercel in web", "Publish of a GitHub release"}},
+		{"other commands for the same targets", `
+      - run: |
+          aws s3 cp build/app.js s3://acme-web-assets/app.js
+          eb deploy shop-prod --staged
+          helm install cache bitnami/redis -n infra
+          docker image push registry.example.com/team/api:1
+          docker build --push --tag registry.example.com/team/web:1 .
+          sls deploy
+          goreleaser release --clean
+      - run: tofu apply -auto-approve
+        working-directory: infra/tofu
+      - run: terragrunt apply --terragrunt-working-dir live/prod
+      - run: vercel deploy --prebuilt
+        working-directory: site`,
+			[]string{"Apply of Terraform in infra/tofu", "Apply of Terraform in live/prod", "Deploy to Elastic Beanstalk environment shop-prod",
+				"Deploy to Helm release infra/cache", "Deploy to S3 bucket acme-web-assets", "Deploy with Serverless Framework at the repository root",
+				"Deploy with Vercel in site", "Publish of a GitHub release", "Push of container image registry.example.com/team/api",
+				"Push of container image registry.example.com/team/web"}},
 		{"a command that only looks like one", `
       - run: echo "aws ecs update-service --cluster prod --service api"
       - run: kubectl get pods -n prod
       - run: aws ecs describe-services --cluster prod --services api`,
 			nil},
 	}
+	used := map[string]bool{} // the recognisers some case went through
+	defer func() {
+		for name := range actionRecognisers {
+			if !used[name] {
+				t.Errorf("no case for the action %s", name)
+			}
+		}
+		for _, r := range commandRecognisers {
+			if !used[r.name] {
+				t.Errorf("no case for the command %q", r.name)
+			}
+		}
+	}()
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			res := collectFiles(t, map[string]string{
 				".github/workflows/deploy.yml": job(strings.TrimPrefix(c.steps, "\n")),
 				"edge/wrangler.toml":           "name = \"edge-router\"\nmain = \"src/index.ts\"\n\n[vars]\nname = \"not-this\"\n",
 			})
+			for _, f := range res.Facts {
+				by, _ := f.Attributes["recognized_by"].([]string)
+				for _, name := range by {
+					used[name] = true
+				}
+			}
 			keys := []string{"region", "account"}
 			for _, w := range c.want {
 				for _, k := range []string{"unresolved", "auth", "registry", "kustomize", "chart"} {
