@@ -1,6 +1,8 @@
 package code
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -11,7 +13,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/brioly/brioly/pkg/collect"
 	"github.com/brioly/brioly/pkg/facts"
+	"github.com/brioly/brioly/pkg/redact"
 )
 
 // GitHub Actions workflows are read for one thing beyond their triggers:
@@ -26,9 +30,12 @@ import (
 // or secret of the repository, the output of a step, the result of a
 // command) is recorded as what the name depends on, never guessed.
 //
-// Nothing of a run: script or an env: value is stored: only the names a
-// recogniser took out of them. Names of secrets and variables are names,
-// and are kept.
+// The text of a run: script is never stored. A value from env:, from a
+// variable a script sets or from a matrix is kept in one case only: where a
+// recognised deploy step uses it as the name of its target, and never when
+// the variable's own name says it is a secret (secretName) or the value
+// looks like one to the secret rules. Names of secrets and variables are
+// names, and are kept.
 
 // workflowFile is a parsed workflow.
 type workflowFile struct {
@@ -44,6 +51,11 @@ type workflowFile struct {
 	workDir  string
 	jobs     []*wfJob // by ID
 	actions  []string
+	// permissions says whether the workflow's permissions: grant id-token
+	// (nil: the workflow has no permissions: of its own).
+	permissions *bool
+	// limits are the limits reading this file reached.
+	limits []string
 }
 
 type wfJob struct {
@@ -56,12 +68,18 @@ type wfJob struct {
 	matrix      *yaml.Node
 	steps       []wfStep
 	line        int
+	// cond: the job has an if:. The expression is not kept or evaluated.
+	cond        bool
+	permissions *bool
+	// usesMatrix: something in the job refers to the matrix.
+	usesMatrix bool
 }
 
 type wfStep struct {
 	id, uses, run, workDir string
 	with, env              map[string]string
 	line                   int
+	cond                   bool
 }
 
 // ---- YAML access ----
@@ -204,7 +222,8 @@ func readWorkflow(rel string, raw []byte) (*workflowFile, error) {
 	}
 	root := doc.Content[0]
 	wf := &workflowFile{rel: rel, lines: strings.Count(string(raw), "\n") + 1, defaults: map[string]string{}}
-	wf.name = scalarOf(root, "name")
+	wf.name = short(scalarOf(root, "name"))
+	wf.permissions = idTokenPermission(child(root, "permissions"))
 	wf.env = scalarMap(child(root, "env"))
 	wf.workDir = scalarOf(child(child(root, "defaults"), "run"), "working-directory")
 
@@ -213,11 +232,11 @@ func readWorkflow(rel string, raw []byte) (*workflowFile, error) {
 	case on == nil:
 	case on.Kind == yaml.MappingNode:
 		for _, p := range pairs(on) {
-			wf.triggers = append(wf.triggers, p.key)
+			wf.triggers = append(wf.triggers, short(p.key))
 			if p.key == "schedule" && p.val != nil && p.val.Kind == yaml.SequenceNode {
 				for _, c := range p.val.Content {
 					if cron := scalarOf(c, "cron"); cron != "" {
-						wf.filters = append(wf.filters, "schedule cron: "+cron)
+						wf.filters = append(wf.filters, "schedule cron: "+short(cron))
 					}
 				}
 				continue
@@ -227,10 +246,17 @@ func readWorkflow(rel string, raw []byte) (*workflowFile, error) {
 				if len(vals) == 0 {
 					continue
 				}
-				if len(vals) > maxFilterValues {
-					vals = append(vals[:maxFilterValues:maxFilterValues], fmt.Sprintf("and %d more", len(vals)-maxFilterValues))
+				// The order patterns are written in is not kept: moving one
+				// is not a change to report.
+				for i := range vals {
+					vals[i] = short(vals[i])
 				}
-				wf.filters = append(wf.filters, p.key+" "+key+": "+strings.Join(vals, ", "))
+				more := len(vals) - maxFilterValues
+				vals = facts.SortedStrings(vals)
+				if more > 0 {
+					vals = append(vals[:maxFilterValues:maxFilterValues], fmt.Sprintf("and %d more", more))
+				}
+				wf.filters = append(wf.filters, short(p.key)+" "+key+": "+strings.Join(vals, ", "))
 			}
 			if p.key == "workflow_call" {
 				for _, in := range pairs(child(p.val, "inputs")) {
@@ -253,6 +279,9 @@ func readWorkflow(rel string, raw []byte) (*workflowFile, error) {
 			continue
 		}
 		job := &wfJob{id: jp.key, line: jn.Line, env: scalarMap(child(jn, "env")), with: scalarMap(child(jn, "with"))}
+		_, job.cond = scalar(child(jn, "if"))
+		job.permissions = idTokenPermission(child(jn, "permissions"))
+		job.usesMatrix = refersTo(jn, "matrix.", 0)
 		job.uses = scalarOf(jn, "uses")
 		job.workDir = scalarOf(child(child(jn, "defaults"), "run"), "working-directory")
 		job.matrix = deref(child(child(jn, "strategy"), "matrix"))
@@ -264,18 +293,23 @@ func readWorkflow(rel string, raw []byte) (*workflowFile, error) {
 			}
 		}
 		if job.uses != "" {
-			wf.actions = append(wf.actions, strings.SplitN(job.uses, "@", 2)[0])
+			wf.actions = append(wf.actions, actionName(job.uses))
 		}
 		if steps := deref(child(jn, "steps")); steps != nil && steps.Kind == yaml.SequenceNode {
-			for _, sn := range steps.Content {
+			for i, sn := range steps.Content {
+				if i >= maxSteps {
+					wf.limits = append(wf.limits, fmt.Sprintf("job %s has more than %d steps; the rest were not read", short(job.id), maxSteps))
+					break
+				}
 				sn = deref(sn)
 				if sn == nil || sn.Kind != yaml.MappingNode {
 					continue
 				}
 				st := wfStep{line: sn.Line, id: scalarOf(sn, "id"), uses: scalarOf(sn, "uses"), run: scalarOf(sn, "run"),
 					workDir: scalarOf(sn, "working-directory"), with: scalarMap(child(sn, "with")), env: scalarMap(child(sn, "env"))}
+				_, st.cond = scalar(child(sn, "if"))
 				if st.uses != "" {
-					wf.actions = append(wf.actions, strings.SplitN(st.uses, "@", 2)[0])
+					wf.actions = append(wf.actions, actionName(st.uses))
 				}
 				job.steps = append(job.steps, st)
 			}
@@ -286,10 +320,61 @@ func readWorkflow(rel string, raw []byte) (*workflowFile, error) {
 	return wf, nil
 }
 
+// actionName is what a step uses, without the version it is pinned to. A
+// container image ("docker://…") is named without its tag and without
+// anything to sign in with.
+func actionName(uses string) string {
+	if image, ok := strings.CutPrefix(uses, "docker://"); ok {
+		repo, _ := collect.SplitImage(stripUserinfo(image))
+		return short("docker://" + repo)
+	}
+	return short(strings.SplitN(uses, "@", 2)[0])
+}
+
+// idTokenPermission reads a permissions: block: whether it lets the job
+// ask GitHub for an OIDC token. Nil means there is no block.
+func idTokenPermission(n *yaml.Node) *bool {
+	n = deref(n)
+	if n == nil {
+		return nil
+	}
+	granted := false
+	if v, ok := scalar(n); ok {
+		granted = v == "write-all"
+	} else {
+		granted = scalarOf(n, "id-token") == "write"
+	}
+	return &granted
+}
+
+// refersTo reports whether any text below n holds what.
+func refersTo(n *yaml.Node, what string, depth int) bool {
+	n = deref(n)
+	if n == nil || depth > 12 {
+		return n != nil // too deep to tell: assume it does
+	}
+	if n.Kind == yaml.ScalarNode {
+		return strings.Contains(strings.ToLower(n.Value), what)
+	}
+	for _, c := range n.Content {
+		if refersTo(c, what, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *repo) parseWorkflow(rel, p string) error {
 	raw, err := os.ReadFile(p)
 	if err != nil {
 		return err
+	}
+	// What is parsed is bounded for the repository as a whole; the walk
+	// visits files in the order of their names, so which ones are left out
+	// does not vary.
+	if r.workflowBytes += len(raw); r.workflowBytes > maxWorkflowBytes {
+		r.workflowErrs = append(r.workflowErrs, fmt.Sprintf("%s: not read: the repository has more than %d MB of workflow files", rel, maxWorkflowBytes>>20))
+		return nil
 	}
 	wf, err := readWorkflow(rel, raw)
 	if err != nil {
@@ -301,6 +386,9 @@ func (r *repo) parseWorkflow(rel, p string) error {
 		r.workflows = map[string]*workflowFile{}
 	}
 	r.workflows[rel] = wf
+	for _, l := range wf.limits {
+		r.workflowErrs = append(r.workflowErrs, rel+": "+l)
+	}
 	return nil
 }
 
@@ -441,13 +529,87 @@ func matrixCombos(n *yaml.Node) (combos []map[string]string, known bool) {
 	return combos, true
 }
 
+// ---- limits ----
+
+// A repository is not trusted to be small, and a workflow file of a few
+// hundred bytes can ask for unbounded work (variables that double, an env
+// value that names itself, a matrix times ninety steps). Everything that is
+// read is therefore counted, and every value is bounded. The numbers are
+// far above what a real workflow needs; a workflow that reaches one is
+// recorded as not read in full, with the limit it reached.
+const (
+	maxCallDepth = 3
+	// maxJobWalks bounds the job and matrix combinations walked per
+	// repository.
+	maxJobWalks = 5000
+	// maxFileWork and maxRepoWork bound the bytes of scripts and values
+	// that are resolved and split into words: for one workflow as the entry
+	// point (with what it calls), and for the whole repository.
+	maxFileWork = 4 << 20
+	maxRepoWork = 24 << 20
+	// maxWorkflowBytes bounds the workflow files parsed per repository.
+	maxWorkflowBytes = 8 << 20
+	// maxScript bounds one run: script.
+	maxScript = 128 << 10
+	// maxValue bounds anything a name is put together from, and so every
+	// stored name: nothing longer is the name of a cluster, a function or
+	// an image.
+	maxValue = 256
+	// maxSteps bounds the steps of one job, maxTargets the deploy targets
+	// of one repository.
+	maxSteps   = 300
+	maxTargets = 1000
+	// maxListed bounds the entries of a list kept on the workflow fact, and
+	// maxText a single text on it.
+	maxListed = 100
+	maxText   = 200
+	// maxReasons bounds the reasons listed in a coverage entry.
+	maxReasons = 20
+)
+
+// short cuts a text that is kept as it is written (a workflow's name, a
+// branch pattern) to a length a document can carry.
+func short(s string) string {
+	if len(s) <= maxText {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxText], "") + "…"
+}
+
+// capValue turns a value that is too long to be a name into "not known".
+func capValue(s string) string {
+	// Also a value put together from many unknown parts: it is no name
+	// either, and unknown parts multiply as easily as text does.
+	if len(s) > maxValue || strings.Count(s, markOpen) > 4 || strings.Contains(s, markOpen+unknownTooLong+markClose) {
+		return mark(unknownTooLong) // and so is whatever a too long value is part of
+	}
+	return s
+}
+
+// secretName reports whether the name of a variable, a matrix key or an
+// input says that its value is a secret. Such a value is never used as a
+// name, whatever it looks like: a password is not shaped like a token. It
+// errs on the side of refusing ("KEY" also refuses S3_KEY_PREFIX).
+func secretName(name string) bool {
+	n := strings.ToUpper(name)
+	for _, part := range []string{"PASSWORD", "PASSWD", "PASSPHRASE", "SECRET", "TOKEN", "KEY", "CREDENTIAL", "PRIVATE", "AUTH", "CERT", "SIGNATURE"} {
+		if strings.Contains(n, part) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- expressions ----
 
 var (
 	expression = regexp.MustCompile(`(?s)\$\{\{(.*?)\}\}`)
 	simpleName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)+$`)
 	contextRef = regexp.MustCompile(`\b(?:vars|secrets|env|inputs|matrix|needs|steps|github|jobs|runner|strategy)\.[A-Za-z0-9_.-]+`)
-	unsafeName = regexp.MustCompile(`[^A-Za-z0-9_.$()-]`)
+	// stringLiteral is a string in an expression: what is inside is text,
+	// not a reference to anything.
+	stringLiteral = regexp.MustCompile(`'(?:[^']|'')*'`)
+	unsafeName    = regexp.MustCompile(`[^A-Za-z0-9_.$()-]`)
 )
 
 // cleanName bounds what a marker can hold: the name of a context value, and
@@ -464,32 +626,76 @@ func cleanName(s string) string {
 // scope is where a value is resolved: one job, one matrix combination, and
 // the step being read.
 type scope struct {
+	ev      *evaluator
 	wf      *workflowFile
 	job     *wfJob
 	stepEnv map[string]string
-	cmdEnv  map[string]string
+	cmdEnv  map[string]string // set on one command line; already resolved
 	matrix  map[string]string
 	inputs  map[string]string
 	st      *jobState
+	// idToken says the job may ask GitHub for an OIDC token.
+	idToken bool
+	// memo holds the env values resolved for the step being read;
+	// resolving holds the names being resolved, to see a value that leads
+	// back to itself.
+	memo      map[string]string
+	resolving map[string]bool
 }
 
 // jobState is what earlier steps of the job established.
 type jobState struct {
 	awsMode, awsRole, awsRegion, awsAccount string
-	cloudflareToken                         bool
-	kubeCluster                             string
+	// awsStatic: access keys were used somewhere earlier in the job. A
+	// role assumed after that is assumed with those keys.
+	awsStatic       bool
+	cloudflareToken bool
+	kubeCluster     string
 	// outputs holds the step outputs whose value the file settles:
 	// "step-id.output" -> value.
 	outputs map[string]string
 }
 
-func (sc *scope) env(name string) (string, bool) {
+// hasEnv reports whether the file gives the step a variable of this name.
+// Only the name is looked at.
+func (sc *scope) hasEnv(name string) bool {
 	for _, m := range []map[string]string{sc.cmdEnv, sc.stepEnv, sc.job.env, sc.wf.env} {
-		if v, ok := m[name]; ok {
-			return v, true
+		if _, ok := m[name]; ok {
+			return true
 		}
 	}
-	return "", false
+	return false
+}
+
+// envValue returns the value the file gives a variable, resolved. A
+// variable whose name says it is a secret has no value here, and one whose
+// value leads back to itself is not known.
+func (sc *scope) envValue(name string, depth int) (string, bool) {
+	if secretName(name) {
+		return "", false
+	}
+	if v, ok := sc.cmdEnv[name]; ok {
+		return v, true
+	}
+	if v, ok := sc.memo[name]; ok {
+		return v, true
+	}
+	var raw string
+	found := false
+	for _, m := range []map[string]string{sc.stepEnv, sc.job.env, sc.wf.env} {
+		if v, ok := m[name]; ok {
+			raw, found = v, true
+			break
+		}
+	}
+	if !found || sc.resolving[name] {
+		return "", false
+	}
+	sc.resolving[name] = true
+	v := capValue(sc.resolveDepth(raw, depth+1))
+	delete(sc.resolving, name)
+	sc.memo[name] = v
+	return v, true
 }
 
 // resolve replaces every ${{ }} in s by its value when the file states it,
@@ -500,19 +706,23 @@ func (sc *scope) resolveDepth(s string, depth int) string {
 	if !strings.Contains(s, "${{") {
 		return s
 	}
+	if !sc.ev.spend(len(s)) || depth > 8 {
+		return mark(unknownExpression)
+	}
 	return expression.ReplaceAllStringFunc(s, func(m string) string {
 		expr := strings.TrimSpace(m[3 : len(m)-2])
-		if depth > 6 {
-			return mark(unknownExpression)
-		}
 		if simpleName.MatchString(expr) {
-			return sc.value(expr, depth)
+			return capValue(sc.value(expr, depth))
 		}
-		names := facts.SortedStrings(contextRef.FindAllString(expr, -1))
+		// Not one name: what it depends on is named when that is one
+		// thing. Two expressions are never taken for the same value, so the
+		// marker also carries a hash of the expression (not its text).
+		names := facts.SortedStrings(contextRef.FindAllString(stringLiteral.ReplaceAllString(expr, "''"), -1))
+		name := unknownExpression
 		if len(names) == 1 {
-			return mark(cleanName(names[0]))
+			name = cleanName(names[0])
 		}
-		return mark(unknownExpression)
+		return mark(name + markHash + shortHash(strings.Join(strings.Fields(expr), " ")))
 	})
 }
 
@@ -520,15 +730,15 @@ func (sc *scope) value(expr string, depth int) string {
 	head, rest, _ := strings.Cut(expr, ".")
 	switch strings.ToLower(head) {
 	case "env":
-		if v, ok := sc.env(rest); ok {
-			return sc.resolveDepth(v, depth+1)
+		if v, ok := sc.envValue(rest, depth); ok {
+			return v
 		}
 	case "matrix":
-		if v, ok := sc.matrix[rest]; ok {
+		if v, ok := sc.matrix[rest]; ok && !secretName(rest) {
 			return v
 		}
 	case "inputs":
-		if v, ok := sc.inputs[rest]; ok {
+		if v, ok := sc.inputs[rest]; ok && !secretName(rest) {
 			return v
 		}
 	case "github":
@@ -536,7 +746,7 @@ func (sc *scope) value(expr string, depth int) string {
 			return "."
 		}
 		if name, ok := strings.CutPrefix(rest, "event.inputs."); ok {
-			if v, ok := sc.inputs[name]; ok {
+			if v, ok := sc.inputs[name]; ok && !secretName(name) {
 				return v
 			}
 		}
@@ -554,11 +764,14 @@ func (sc *scope) value(expr string, depth int) string {
 // script set itself, then the environment the file gives the step.
 func (sc *scope) shellLookup(locals map[string]string) func(string) (string, bool) {
 	return func(name string) (string, bool) {
+		if secretName(name) {
+			return "", false
+		}
 		if v, ok := locals[name]; ok {
 			return v, true
 		}
-		if v, ok := sc.env(name); ok {
-			return sc.resolve(v), true
+		if v, ok := sc.envValue(name, 0); ok {
+			return v, true
 		}
 		if name == "GITHUB_WORKSPACE" {
 			return ".", true
@@ -589,7 +802,9 @@ type target struct {
 	credentials            string
 	role                   string
 	definedIn              string
-	line                   int
+	// conditional: every step that names the target is under an if:.
+	conditional bool
+	line        int
 }
 
 // evaluation is what walking one workflow as the entry point found.
@@ -601,25 +816,56 @@ type evaluation struct {
 }
 
 type evaluator struct {
-	r *repo
-	// budget bounds the jobs walked in one repository: matrices multiply
-	// through called workflows, and a repository is not trusted to be small.
-	budget int
+	r   *repo
+	red *redact.Redactor
+	// What is left of the limits above.
+	jobs, repoWork, fileWork, targets int
+	// entry is the workflow being walked as the entry point; stopped says
+	// its walk reached a limit and goes no further.
+	entry   string
+	stopped bool
+	// wrangler holds the wrangler configurations already read, by path
+	// (nil: no usable file there).
+	wrangler map[string]*wranglerConfig
+	// masked remembers what the secret rules said about a value.
+	masked map[string]bool
 }
 
-const (
-	maxCallDepth = 3
-	maxJobWalks  = 5000
-)
+// stop ends the walk of the entry workflow and records which limit it
+// reached. What was found until then is kept.
+func (ev *evaluator) stop(limit string) {
+	if !ev.stopped {
+		ev.stopped = true
+		ev.r.workflowErrs = append(ev.r.workflowErrs, ev.entry+": reading stopped at a limit ("+limit+"); deploy targets beyond it are missing")
+	}
+}
 
-// errTooManyJobs is recorded once for a repository whose workflows expand
-// into more jobs than are walked.
-const errTooManyJobs = "workflows: more job combinations than are followed; some deploy targets may be missing"
+// spend takes n bytes of work from what is left and reports whether the
+// walk goes on.
+func (ev *evaluator) spend(n int) bool {
+	if ev.stopped {
+		return false
+	}
+	ev.fileWork -= n
+	ev.repoWork -= n
+	switch {
+	case ev.repoWork < 0:
+		ev.stop(fmt.Sprintf("%d MB of scripts and values per repository", maxRepoWork>>20))
+	case ev.fileWork < 0:
+		ev.stop(fmt.Sprintf("%d MB of scripts and values per workflow", maxFileWork>>20))
+	}
+	return !ev.stopped
+}
 
 func (ev *evaluator) workflow(wf *workflowFile) *evaluation {
 	out := &evaluation{targets: map[string]*target{}, calls: map[string]bool{}, environments: map[string]bool{}, credentials: map[string]bool{}}
+	ev.entry, ev.stopped, ev.fileWork = wf.rel, false, maxFileWork
+	if ev.repoWork < 0 || ev.jobs < 0 || ev.targets >= maxTargets {
+		ev.stop("the repository's limit was reached in an earlier workflow")
+		return out
+	}
 	for _, job := range wf.jobs {
-		ev.job(out, wf, wf, job, job.id, nil, []string{wf.rel})
+		ev.job(out, wf, wf, job, job.id, idPart(job.id, false), nil, false, false, []string{wf.rel})
 	}
 	return out
 }
@@ -633,22 +879,38 @@ func localWorkflow(uses string) string {
 	return path.Clean(strings.SplitN(uses, "@", 2)[0])
 }
 
-func (ev *evaluator) job(out *evaluation, entry, wf *workflowFile, job *wfJob, jobPath string, inputs map[string]string, stack []string) {
+// job walks one job. jobPath is how the job is shown ("release/deploy" for
+// a job of a called workflow) and jobID the same as part of a fact ID.
+// conditional says a job that called this one is under an if:, and idToken
+// that the caller may ask for an OIDC token.
+func (ev *evaluator) job(out *evaluation, entry, wf *workflowFile, job *wfJob, jobPath, jobID string, inputs map[string]string, conditional, idToken bool, stack []string) {
 	combos, known := matrixCombos(job.matrix)
+	if !job.usesMatrix {
+		combos = combos[:1] // every combination would say the same
+	}
+	switch {
+	case job.permissions != nil:
+		idToken = *job.permissions
+	case wf.permissions != nil:
+		idToken = *wf.permissions
+	}
+	conditional = conditional || job.cond
 	for _, combo := range combos {
-		if ev.budget--; ev.budget < 0 {
-			if ev.budget == -1 {
-				ev.r.workflowErrs = append(ev.r.workflowErrs, errTooManyJobs)
-			}
+		if ev.stopped {
+			return
+		}
+		if ev.jobs--; ev.jobs < 0 {
+			ev.stop(fmt.Sprintf("%d job and matrix combinations per repository", maxJobWalks))
 			return
 		}
 		st := &jobState{outputs: map[string]string{}}
-		sc := &scope{wf: wf, job: job, matrix: combo, inputs: inputs, st: st}
+		sc := &scope{ev: ev, wf: wf, job: job, matrix: combo, inputs: inputs, st: st, idToken: idToken,
+			memo: map[string]string{}, resolving: map[string]bool{}}
 		if !known {
 			sc.matrix = nil
 		}
 		ev.envCredentials(out, sc)
-		environment := display(sc.resolve(job.environment))
+		environment := ev.kept("environment", capValue(sc.resolve(job.environment)))
 		if environment != "" {
 			out.environments[environment] = true
 		}
@@ -657,32 +919,35 @@ func (ev *evaluator) job(out *evaluation, entry, wf *workflowFile, job *wfJob, j
 			callee := localWorkflow(job.uses)
 			if callee == "" {
 				// Another repository's workflow: named, not fetched.
-				out.calls[strings.SplitN(job.uses, "@", 2)[0]] = true
+				out.calls[short(stripUserinfo(strings.SplitN(job.uses, "@", 2)[0]))] = true
 				continue
 			}
-			out.calls[callee] = true
+			out.calls[short(callee)] = true
 			called := ev.r.workflows[callee]
 			if called == nil || len(stack) >= maxCallDepth || contains(stack, callee) {
 				continue
 			}
 			bound := map[string]string{}
 			for k, v := range called.defaults {
-				bound[k] = v
+				bound[k] = capValue(v)
 			}
 			for k, v := range job.with {
-				bound[k] = sc.resolve(v)
+				bound[k] = capValue(sc.resolve(v))
 			}
 			for _, cj := range called.jobs {
-				ev.job(out, entry, called, cj, jobPath+"/"+cj.id, bound, append(stack, callee))
+				ev.job(out, entry, called, cj, jobPath+"/"+cj.id, jobID+"/"+idPart(cj.id, false), bound, conditional, idToken, append(stack, callee))
 			}
 			continue
 		}
 
 		for _, step := range job.steps {
-			sc.stepEnv, sc.cmdEnv = step.env, nil
+			if ev.stopped {
+				return
+			}
+			sc.stepEnv, sc.cmdEnv, sc.memo = step.env, nil, map[string]string{}
 			ev.envCredentials(out, sc)
 			emit := func(f found) {
-				ev.add(out, entry, wf, jobPath, environment, sc, f, step.line)
+				ev.add(out, entry, wf, jobPath, jobID, environment, sc, f, step.line, conditional || step.cond)
 			}
 			cwd := "."
 			for _, d := range []string{wf.workDir, job.workDir, step.workDir} {
@@ -690,12 +955,17 @@ func (ev *evaluator) job(out *evaluation, entry, wf *workflowFile, job *wfJob, j
 					cwd = d // the most specific one that is set
 				}
 			}
-			cwd = joinPath(".", sc.resolve(cwd))
+			cwd = joinPath(".", capValue(sc.resolve(cwd)))
 			if step.uses != "" {
 				ev.action(out, sc, step, cwd, emit)
 			}
 			if step.run != "" {
-				ev.script(out, sc, sc.resolve(step.run), cwd, emit, 0)
+				text := sc.resolve(step.run)
+				if len(text) > maxScript {
+					ev.r.workflowErrs = append(ev.r.workflowErrs, fmt.Sprintf("%s: a run: script of job %s is longer than %d KB and was not read", wf.rel, short(job.id), maxScript>>10))
+					continue
+				}
+				ev.script(out, sc, text, cwd, emit, 0)
 			}
 		}
 	}
@@ -713,22 +983,20 @@ func contains(list []string, v string) bool {
 // envCredentials notes credentials that the environment of the workflow,
 // job or step carries by name.
 func (ev *evaluator) envCredentials(out *evaluation, sc *scope) {
-	if _, ok := sc.env("AWS_ACCESS_KEY_ID"); ok && sc.st.awsMode != credentialsStatic {
-		sc.st.awsMode = credentialsStatic
+	if sc.hasEnv("AWS_ACCESS_KEY_ID") && !sc.st.awsStatic {
+		sc.st.awsStatic, sc.st.awsMode = true, credentialsStatic
 		out.credentials["aws:"+credentialsStatic] = true
 	}
 	if sc.st.awsRegion == "" {
 		for _, name := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
-			if v, ok := sc.env(name); ok {
-				if v = sc.resolve(v); !hasMark(v) {
-					sc.st.awsRegion = v
-					break
-				}
+			if v, ok := sc.envValue(name, 0); ok && !hasMark(v) {
+				sc.st.awsRegion = v
+				break
 			}
 		}
 	}
 	for _, name := range []string{"CLOUDFLARE_API_TOKEN", "CF_API_TOKEN"} {
-		if _, ok := sc.env(name); ok && !sc.st.cloudflareToken {
+		if sc.hasEnv(name) && !sc.st.cloudflareToken {
 			sc.st.cloudflareToken = true
 			out.credentials["cloudflare:"+credentialsToken] = true
 		}
@@ -737,44 +1005,83 @@ func (ev *evaluator) envCredentials(out *evaluation, sc *scope) {
 
 // How a job signs in to what it deploys to.
 const (
-	credentialsOIDC   = "oidc"        // a role assumed through GitHub's OIDC provider: no stored key
-	credentialsStatic = "static_keys" // access keys stored as secrets
-	credentialsToken  = "api_token"   // an API token stored as a secret
+	// credentialsOIDC: a role assumed with a token from GitHub's OIDC
+	// provider, no stored key. Said only when the file shows it: a role to
+	// assume, no access keys anywhere before it in the job, and the
+	// id-token permission.
+	credentialsOIDC = "oidc"
+	// credentialsStatic: access keys stored as secrets, whether or not a
+	// role is assumed with them afterwards.
+	credentialsStatic = "static_keys"
+	// credentialsRole: a role is assumed, and the file does not show with
+	// what.
+	credentialsRole  = "role"
+	credentialsToken = "api_token" // an API token stored as a secret
 )
 
-var roleARN = regexp.MustCompile(`^arn:aws[a-z-]*:iam::(\d{12}):role/`)
+var (
+	roleARN   = regexp.MustCompile(`^arn:aws[a-z-]*:iam::(\d{12}):role/`)
+	accountID = regexp.MustCompile(`^\d{12}$`)
+)
 
 // action reads a step that uses an action: what it establishes for later
 // steps, and what it deploys.
 func (ev *evaluator) action(out *evaluation, sc *scope, step wfStep, cwd string, emit func(found)) {
 	name := strings.ToLower(strings.SplitN(step.uses, "@", 2)[0])
-	with := func(key string) string { return strings.TrimSpace(sc.resolve(step.with[key])) }
+	with := func(key string) string {
+		raw := step.with[key]
+		if !ev.spend(len(raw)) {
+			return ""
+		}
+		return strings.TrimSpace(sc.resolve(raw))
+	}
 	has := func(key string) bool { _, ok := step.with[key]; return ok }
 	st := sc.st
 	switch name {
 	case "aws-actions/configure-aws-credentials":
 		switch {
 		case has("aws-access-key-id"):
+			st.awsStatic, st.awsMode = true, credentialsStatic
+		case st.awsStatic:
+			// Keys came earlier (a step, or the environment): a role
+			// assumed now is assumed with them.
 			st.awsMode = credentialsStatic
-		case has("role-to-assume"):
+		case !has("role-to-assume"):
+		case has("web-identity-token-file"):
+			st.awsMode = credentialsRole // a token from somewhere the file does not show
+		case with("role-chaining") == "true":
+			if st.awsMode == "" {
+				st.awsMode = credentialsRole // chained from credentials the file does not show
+			}
+		case sc.idToken:
 			st.awsMode = credentialsOIDC
+		default:
+			st.awsMode = credentialsRole
 		}
 		if st.awsMode != "" {
 			out.credentials["aws:"+st.awsMode] = true
 		}
 		st.awsRole, st.awsAccount = "", ""
-		if role := with("role-to-assume"); role != "" {
+		if role := capValue(with("role-to-assume")); role != "" {
 			st.awsRole = role
 			if m := roleARN.FindStringSubmatch(role); m != nil {
 				st.awsAccount = m[1]
 			}
 		}
-		if region := with("aws-region"); region != "" && !hasMark(region) {
+		if region := with("aws-region"); region != "" && !hasMark(region) && len(region) <= maxValue {
 			st.awsRegion = region
 		}
 	case "aws-actions/amazon-ecr-login":
 		if step.id != "" && with("registry-type") != "public" {
-			st.outputs[step.id+".registry"] = ecrRegistry
+			// The registry of the account that signed in, or of the one
+			// account the step names. Which account signed in is not
+			// taken from the role: a role can be in another account than
+			// the registry.
+			account := ""
+			if ids := strings.Split(with("registries"), ","); len(ids) == 1 && accountID.MatchString(strings.TrimSpace(ids[0])) {
+				account = strings.TrimSpace(ids[0])
+			}
+			st.outputs[step.id+".registry"] = ecrRegistry + account
 		}
 	case "docker/metadata-action":
 		if step.id != "" {
@@ -786,16 +1093,16 @@ func (ev *evaluator) action(out *evaluation, sc *scope, step wfStep, cwd string,
 						line = v
 					}
 				}
-				if !strings.Contains(line, "=") {
-					images = append(images, line)
+				if !strings.Contains(line, "=") && len(images) < maxListed {
+					images = append(images, capValue(line))
 				}
 			}
 			st.outputs[step.id+".tags"] = strings.Join(images, "\n")
 		}
 	case "google-github-actions/get-gke-credentials":
-		st.kubeCluster = with("cluster_name")
+		st.kubeCluster = capValue(with("cluster_name"))
 	case "azure/aks-set-context":
-		st.kubeCluster = with("cluster-name")
+		st.kubeCluster = capValue(with("cluster-name"))
 	}
 	if rec, ok := actionRecognisers[name]; ok {
 		for _, f := range rec(actionStep{ev: ev, with: with, has: has, cwd: cwd, sc: sc}) {
@@ -807,13 +1114,25 @@ func (ev *evaluator) action(out *evaluation, sc *scope, step wfStep, cwd string,
 
 // script reads a run: script whose ${{ }} are already resolved.
 func (ev *evaluator) script(out *evaluation, sc *scope, text, cwd string, emit func(found), depth int) {
+	if !ev.spend(len(text)) {
+		return
+	}
 	cmds, subs := lexScript(text)
 	locals := map[string]string{}
 	lookup := sc.shellLookup(locals)
 	for _, cmd := range cmds {
+		if ev.stopped {
+			return
+		}
 		words := make([]string, 0, len(cmd))
 		for _, w := range cmd {
-			words = append(words, expandWord(w, lookup))
+			word := expandWord(w, lookup)
+			if m := assignment.FindStringSubmatch(word); m != nil {
+				word = m[1] + "=" + capValue(m[2]) // the value is bounded, the assignment stays one
+			} else {
+				word = capValue(word)
+			}
+			words = append(words, word)
 		}
 		for len(words) > 0 && shellKeywords[words[0]] {
 			words = words[1:]
@@ -853,7 +1172,7 @@ func (ev *evaluator) script(out *evaluation, sc *scope, text, cwd string, emit f
 		if len(words) == 0 {
 			continue
 		}
-		ev.command(out, sc, words, cwd, emit)
+		ev.command(sc, words, cwd, emit)
 	}
 	sc.cmdEnv = nil
 	if depth < 2 {
@@ -886,7 +1205,7 @@ func stripRunner(words []string) []string {
 }
 
 // command matches one command line against the recognisers.
-func (ev *evaluator) command(out *evaluation, sc *scope, words []string, cwd string, emit func(found)) {
+func (ev *evaluator) command(sc *scope, words []string, cwd string, emit func(found)) {
 	tool := path.Base(words[0])
 	if i := strings.Index(tool, "@"); i > 0 {
 		tool = tool[:i] // "npx wrangler@4 deploy"
@@ -928,10 +1247,53 @@ func (ev *evaluator) command(out *evaluation, sc *scope, words []string, cwd str
 	}
 }
 
+// kept returns a value as it is stored. A value that is too long to be a
+// name, or that the secret rules would mask (as the value of that
+// attribute), is stored as "not known" instead: nothing that looks like a
+// secret leaves the collector, and no fact ID is built from it.
+func (ev *evaluator) kept(key, v string) string {
+	return display(ev.checked(key, v))
+}
+
+func (ev *evaluator) checked(key, v string) string {
+	switch {
+	case v == "" || hasMark(v):
+		return v
+	case len(v) > maxValue:
+		return mark(unknownTooLong)
+	case ev.masks(key, v):
+		return mark(unknownSecret)
+	}
+	return v
+}
+
+// masks asks the secret rules about a value, once per value: the same
+// targets are met again for every step and matrix combination, and asking
+// is the most expensive thing done here. An answer that is not remembered
+// counts as work.
+func (ev *evaluator) masks(key, v string) bool {
+	if ev.red == nil {
+		return false
+	}
+	k := key + "\x00" + v
+	if got, ok := ev.masked[k]; ok {
+		return got
+	}
+	if !ev.spend(512) {
+		return true // not asked: not kept
+	}
+	if len(ev.masked) > 20000 {
+		ev.masked = map[string]bool{}
+	}
+	got := ev.red.Masks(key, v)
+	ev.masked[k] = got
+	return got
+}
+
 // add turns what a recogniser found into a target of the entry workflow.
-func (ev *evaluator) add(out *evaluation, entry, wf *workflowFile, jobPath, environment string, sc *scope, f found, line int) {
+func (ev *evaluator) add(out *evaluation, entry, wf *workflowFile, jobPath, jobID, environment string, sc *scope, f found, line int, conditional bool) {
 	spec, ok := targetTypes[f.typ]
-	if !ok {
+	if !ok || ev.stopped {
 		return
 	}
 	normalize(&f)
@@ -942,22 +1304,33 @@ func (ev *evaluator) add(out *evaluation, entry, wf *workflowFile, jobPath, envi
 	}
 	st := sc.st
 	t := &target{typ: f.typ, jobPath: jobPath, fields: map[string]string{}, unresolved: map[string]bool{},
-		by: map[string]bool{f.by: true}, from: map[string]bool{}, environment: environment, line: line}
+		by: map[string]bool{f.by: true}, from: map[string]bool{}, environment: environment, line: line, conditional: conditional}
 	if f.from != "" {
 		t.from[f.from] = true
 	}
 	if wf != entry {
 		t.definedIn = wf.rel
 	}
-	onAWS := spec.platform == "aws" || f.typ == "container_image" && (f.fields["registry"] == ecrRegistryName || f.fields["account"] != "")
+	role := ev.kept("role_to_assume", st.awsRole)
+	if strings.Contains(role, unknownSecret) || strings.Contains(role, unknownTooLong) {
+		role = ""
+	}
+	ecr := f.typ == "container_image" && (f.fields["registry"] == ecrRegistryName || f.fields["account"] != "")
 	switch {
-	case onAWS:
-		t.credentials, t.role = st.awsMode, display(st.awsRole)
+	case spec.platform == "aws":
+		t.credentials, t.role = st.awsMode, role
 		if f.fields["region"] == "" {
 			f.fields["region"] = st.awsRegion
 		}
 		if f.fields["account"] == "" {
 			f.fields["account"] = st.awsAccount
+		}
+	case ecr:
+		// The registry's account is the one the image or the login names,
+		// never the role's: the two can differ.
+		t.credentials, t.role = st.awsMode, role
+		if f.fields["region"] == "" {
+			f.fields["region"] = st.awsRegion
 		}
 	case spec.platform == "cloudflare":
 		if st.cloudflareToken || f.fields["api_token"] != "" {
@@ -969,37 +1342,63 @@ func (ev *evaluator) add(out *evaluation, entry, wf *workflowFile, jobPath, envi
 			// The cluster named by "aws eks update-kubeconfig" is reached
 			// with the job's AWS identity.
 			f.fields["cluster"] = st.kubeCluster
-			t.credentials, t.role = st.awsMode, display(st.awsRole)
+			t.credentials, t.role = st.awsMode, role
 		}
 	}
 	delete(f.fields, "api_token")
 
-	var idParts, nameParts []string
-	for _, key := range spec.identity {
-		v := f.fields[key]
-		for _, name := range markers(v) {
-			t.unresolved[name] = true
-		}
-		idParts = append(idParts, idPart(v))
-		if v != "" {
-			nameParts = append(nameParts, display(v))
-		}
-	}
 	for key, v := range f.fields {
-		if v == "" {
-			continue
-		}
-		if hasMark(v) && !isIdentity(spec, key) {
-			continue // a side value that is not known is simply left out
-		}
-		t.fields[key] = display(v)
+		f.fields[key] = ev.checked(key, v)
 	}
-	t.name = spec.name(nameParts, t.fields)
-	t.id = ev.r.id + ":deploy:" + idPart(entry.rel) + ":" + idPart(jobPath) + ":" + f.typ + ":" + strings.Join(idParts, "/")
+	build := func() {
+		var idParts, nameParts []string
+		for i, key := range spec.identity {
+			v := f.fields[key]
+			for _, name := range markers(v) {
+				t.unresolved[name] = true
+			}
+			// Only the last value may hold "/" (an image's path, a path in
+			// the repository): the parts of an ID then cannot be read two
+			// ways.
+			idParts = append(idParts, idPart(v, i == len(spec.identity)-1 && (key == "image" || key == "path")))
+			if v != "" {
+				nameParts = append(nameParts, display(v))
+			}
+		}
+		for key, v := range f.fields {
+			delete(t.fields, key)
+			if v == "" || hasMark(v) && !isIdentity(spec, key) {
+				continue // a side value that is not known is simply left out
+			}
+			t.fields[key] = display(v)
+		}
+		t.name = spec.name(nameParts, t.fields)
+		t.id = ev.r.id + ":deploy:" + idPart(entry.rel, true) + ":" + jobID + ":" + f.typ + ":" + strings.Join(idParts, "/")
+	}
+	build()
+	if ev.red != nil {
+		// The parts passed one by one; together, in a name or an ID, they
+		// can still read as a secret to the rules ("…key: value"). Then
+		// none of the values is kept, and failing that the ID is a hash.
+		if ev.masks("", t.name) || ev.masks("", t.id) {
+			for _, key := range spec.identity {
+				if v := f.fields[key]; v != "" && !hasMark(v) {
+					f.fields[key] = mark(unknownSecret)
+				}
+			}
+			build()
+		}
+		if ev.masks("", t.id) {
+			t.id = ev.r.id + ":deploy:~" + longHash(t.id)
+		}
+	}
 
+	if ev.stopped {
+		return // a limit was reached while this target was put together
+	}
 	if prev, ok := out.targets[t.id]; ok {
 		// The same target named by several steps (set image, then rollout
-		// status) or matrix combinations is one target.
+		// restart) or matrix combinations is one target.
 		for k := range t.by {
 			prev.by[k] = true
 		}
@@ -1015,6 +1414,7 @@ func (ev *evaluator) add(out *evaluation, entry, wf *workflowFile, jobPath, envi
 		if prev.role != t.role {
 			prev.role = ""
 		}
+		prev.conditional = prev.conditional && t.conditional
 		for _, key := range []string{"region", "account", "cluster", "namespace", "chart"} {
 			if !isIdentity(spec, key) && prev.fields[key] != t.fields[key] {
 				delete(prev.fields, key) // the steps disagree: not stated
@@ -1023,6 +1423,10 @@ func (ev *evaluator) add(out *evaluation, entry, wf *workflowFile, jobPath, envi
 		if t.line < prev.line {
 			prev.line = t.line
 		}
+		return
+	}
+	if ev.targets++; ev.targets > maxTargets {
+		ev.stop(fmt.Sprintf("%d deploy targets per repository", maxTargets))
 		return
 	}
 	out.targets[t.id] = t
@@ -1039,15 +1443,25 @@ func isIdentity(spec targetSpec, key string) bool {
 
 // ---- values with markers ----
 
+// markHash separates, inside a marker, the name that is shown from a hash
+// that only tells two unknown values apart.
+const markHash = "\x04"
+
 var marker = regexp.MustCompile(markOpen + `([^` + markClose + `]*)` + markClose)
 
 func hasMark(s string) bool { return strings.Contains(s, markOpen) }
+
+// markerName is the part of a marker that is shown.
+func markerName(inner string) string {
+	name, _, _ := strings.Cut(inner, markHash)
+	return name
+}
 
 // markers returns the names a value depends on.
 func markers(s string) []string {
 	var out []string
 	for _, m := range marker.FindAllStringSubmatch(s, -1) {
-		out = append(out, m[1])
+		out = append(out, markerName(m[1]))
 	}
 	return out
 }
@@ -1056,11 +1470,11 @@ func markers(s string) []string {
 // not as the expression or variable it depends on.
 func display(s string) string {
 	s = marker.ReplaceAllStringFunc(s, func(m string) string {
-		name := m[1 : len(m)-1]
+		name := markerName(m[1 : len(m)-1])
 		switch {
 		case strings.HasPrefix(name, "$"):
 			return name
-		case name == unknownExpression || name == unknownStdin || name == unknownWrangler:
+		case pseudoNames[name]:
 			return "(" + name + ")"
 		default:
 			return "${{ " + name + " }}"
@@ -1075,19 +1489,31 @@ func display(s string) string {
 	}, strings.TrimSpace(s))
 }
 
-var unsafeID = regexp.MustCompile(`[^A-Za-z0-9._@+=:/~-]`)
+var (
+	safePart = regexp.MustCompile(`^[A-Za-z0-9._@+=-]+$`)
+	safePath = regexp.MustCompile(`^[A-Za-z0-9._@+=-]+(/[A-Za-z0-9._@+=-]+)*$`)
+)
 
-// idPart makes a value safe to be part of a fact ID. A value that is not
-// known is a short hash of what it depends on: the ID stays the same as long
-// as the workflow names the target the same way.
-func idPart(v string) string {
-	if v == "" {
+// idPart writes a value as one part of a fact ID. Parts are joined with ":"
+// and, inside the last one, "/", so a value is written as it is only when
+// it holds neither (slashes: except "/" between path elements) and nothing
+// else outside a small alphabet. Any other value, and a value that is not
+// known, is a hash of itself: two different values never give the same
+// part, and nothing is replaced character by character.
+func idPart(v string, slashes bool) string {
+	switch {
+	case v == "":
 		return "-"
+	case v == "-" || hasMark(v) || len(v) > 120:
+	case safePart.MatchString(v) || slashes && safePath.MatchString(v):
+		return v
 	}
-	if hasMark(v) || len(v) > 120 {
-		return "~" + shortHash(display(v))
-	}
-	return unsafeID.ReplaceAllString(v, "_")
+	return "~" + longHash(v)
+}
+
+func longHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:6])
 }
 
 // joinPath joins a directory and a path inside the repository. A path that
@@ -1114,11 +1540,19 @@ func lastPathElement(s string) string {
 	return s[strings.LastIndex(s, "/")+1:]
 }
 
+var userinfo = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)?[^/@\s]*@`)
+
+// stripUserinfo removes "user:password@" from the head of an address,
+// with or without a scheme before it.
+func stripUserinfo(s string) string {
+	return userinfo.ReplaceAllString(s, "$1")
+}
+
 // splitList splits a multi-line or comma-separated input into its values.
 func splitList(s string) []string {
 	var out []string
 	for _, line := range strings.FieldsFunc(s, func(c rune) bool { return c == '\n' || c == '\r' }) {
-		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") && len(out) < maxListed {
 			out = append(out, line)
 		}
 	}
@@ -1130,7 +1564,13 @@ func splitList(s string) []string {
 // finishWorkflows turns the parsed workflows into facts: one per workflow
 // and one per deploy target, and records what could not be read.
 func (r *repo) finishWorkflows() {
-	ev := &evaluator{r: r, budget: maxJobWalks}
+	ev := &evaluator{r: r, jobs: maxJobWalks, repoWork: maxRepoWork, wrangler: map[string]*wranglerConfig{}, masked: map[string]bool{}}
+	if len(r.workflows) > 0 {
+		// The same rules that mask values later decide here what may be
+		// part of a name or an ID at all.
+		ev.red, _ = redact.Shared()
+	}
+	seen := map[string]bool{}
 	// A workflow that only exists to be called, and is called from this
 	// repository, has no targets of its own: its callers have them, with
 	// the inputs they pass.
@@ -1156,7 +1596,11 @@ func (r *repo) finishWorkflows() {
 		if len(wf.filters) > 0 {
 			f.Attributes["trigger_filters"] = facts.SortedStrings(wf.filters)
 		}
-		f.Attributes["actions"] = facts.SortedStrings(wf.actions)
+		actions := facts.SortedStrings(wf.actions)
+		if len(actions) > maxListed {
+			actions = actions[:maxListed]
+		}
+		f.Attributes["actions"] = actions
 		kinds := map[string]bool{}
 		for _, t := range res.targets {
 			kinds[targetTypes[t.typ].summary(t)] = true
@@ -1185,6 +1629,14 @@ func (r *repo) finishWorkflows() {
 		}
 		for _, tid := range sortedKeys(res.targets) {
 			t := res.targets[tid]
+			// Two targets cannot have one ID. Should it happen all the
+			// same, one is left out and the scan goes on: a duplicate
+			// would otherwise fail the whole snapshot.
+			if seen[tid] {
+				r.workflowErrs = append(r.workflowErrs, rel+": two deploy targets had the same ID; one was left out")
+				continue
+			}
+			seen[tid] = true
 			file := rel
 			if t.definedIn != "" {
 				file = t.definedIn
@@ -1200,6 +1652,9 @@ func (r *repo) finishWorkflows() {
 			}
 			if t.environment != "" {
 				tf.Attributes["environment"] = t.environment
+			}
+			if t.conditional {
+				tf.Attributes["conditional"] = true
 			}
 			if t.credentials != "" {
 				tf.Attributes["auth"] = t.credentials
@@ -1228,8 +1683,11 @@ func (r *repo) finishWorkflows() {
 	// workflows instead of showing them as removed.
 	status, detail := facts.CoverageComplete, ""
 	if len(r.workflowErrs) > 0 {
-		sort.Strings(r.workflowErrs)
-		status, detail = facts.CoveragePartial, strings.Join(r.workflowErrs, "; ")
+		errs := facts.SortedStrings(r.workflowErrs)
+		if more := len(errs) - maxReasons; more > 0 {
+			errs = append(errs[:maxReasons:maxReasons], fmt.Sprintf("and %d more", more))
+		}
+		status, detail = facts.CoveragePartial, strings.Join(errs, "; ")
 	}
 	for _, kind := range []string{"code.ci_workflow", "code.deploy_target"} {
 		r.res.Coverage = append(r.res.Coverage, facts.Coverage{Connector: r.src.Connector, Scope: r.src.Scope, Kind: kind, Status: status, Detail: detail})

@@ -320,19 +320,54 @@ func TestDeployOnlyRepositoryIsNotEveryComponentsCode(t *testing.T) {
 	}
 }
 
-// What a workflow shows wins over a name: the repository that deploys the
-// service is its code even when another repository has the service's name.
-func TestDeployEvidenceWinsOverNames(t *testing.T) {
+// A name that fits exactly one repository says more than a repository that
+// only deploys the component: that one may be where deploys are run from.
+// A repository that builds the component's image is its code whatever the
+// names say.
+func TestNameMatchWinsOverDeployOnlyEvidence(t *testing.T) {
 	w := newWorld(t)
 	apiSvc, _ := w.ecs("111122223333", "eu-west-1", "prod", "api", "x/api")
 	w.fact("gh:acme/api", "code.repository", "api", facts.Source{Connector: "github", Scope: "acme/api"}, nil)
-	backend, wf := w.repo("backend")
-	w.target(wf, "ecs_service", "prod/api", map[string]any{"cluster": "prod", "service": "api"})
+	ops, wf := w.repo("ops")
+	target := w.target(wf, "ecs_service", "prod/api", map[string]any{"cluster": "prod", "service": "api"})
 	comps, _ := w.build()
-	if m := members(comps[apiSvc]); !strings.Contains(m, backend+" ") || strings.Contains(m, "gh:acme/api ") {
+	if m := members(comps[apiSvc]); !strings.Contains(m, "gh:acme/api ") || strings.Contains(m, ops+" ") || !strings.Contains(m, target) {
 		t.Errorf("members = %v", comps[apiSvc].Members)
 	}
-	if comps["gh:acme/api"].Role != RoleCodeOnly {
-		t.Error("the repository that only shares the name should stay on its own")
+	if comps[ops].Role != RoleCodeOnly {
+		t.Error("the repository that only deploys should stay on its own")
+	}
+
+	// No repository has the component's name: the one that deploys it, and
+	// nothing else, is taken.
+	w = newWorld(t)
+	apiSvc, _ = w.ecs("111122223333", "eu-west-1", "prod", "api", "x/api")
+	backend, wf := w.repo("backend")
+	w.target(wf, "ecs_service", "prod/api", map[string]any{"cluster": "prod", "service": "api"})
+	comps, _ = w.build()
+	if m := members(comps[apiSvc]); !strings.Contains(m, backend+" ") {
+		t.Errorf("members = %v", comps[apiSvc].Members)
+	}
+
+	// The repository that pushes the image wins over the one with the name.
+	w = newWorld(t)
+	apiSvc, _ = w.ecs("111122223333", "eu-west-1", "prod", "api", "ghcr.io/acme/api")
+	w.fact("gh:acme/api", "code.repository", "api", facts.Source{Connector: "github", Scope: "acme/api"}, nil)
+	mono, wf := w.repo("monorepo")
+	w.target(wf, "container_image", "ghcr.io/acme/api", map[string]any{"registry": "ghcr.io", "image": "acme/api"})
+	comps, _ = w.build()
+	if m := members(comps[apiSvc]); !strings.Contains(m, mono+" ") || strings.Contains(m, "gh:acme/api ") {
+		t.Errorf("members = %v", comps[apiSvc].Members)
+	}
+}
+
+// Manifests applied from a path where no workload manifest was found are
+// not "somewhere that was not scanned": the path is in the repository.
+func TestManifestPathWithoutWorkloads(t *testing.T) {
+	w := newWorld(t)
+	_, wf := w.repo("shop")
+	empty := w.target(wf, "kubernetes_manifests", "deploy/crds", map[string]any{"path": "deploy/crds"})
+	if st := DeployStatuses(w.s)[empty]; st.State != DeployNoManifest {
+		t.Errorf("status = %+v", st)
 	}
 }

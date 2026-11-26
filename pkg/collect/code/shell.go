@@ -23,11 +23,22 @@ const (
 
 // Pseudo-names of what a value can depend on besides an expression.
 const (
-	unknownCommand    = "$(...)"                 // the output of a command
-	unknownExpression = "expression"             // an expression that is not one name
-	unknownStdin      = "stdin"                  // manifests piped in
-	unknownWrangler   = "wrangler configuration" // a Worker's name that no wrangler file states
+	unknownCommand    = "$(...)"                           // the output of a command
+	unknownExpression = "expression"                       // an expression that is not one name
+	unknownStdin      = "stdin"                            // manifests piped in
+	unknownWrangler   = "wrangler configuration"           // a Worker's name that no wrangler file states
+	unknownTooLong    = "a value too long to be a name"    // longer than maxValue
+	unknownSecret     = "a value that looks like a secret" // what the secret rules would mask
 )
+
+// pseudoNames are shown in brackets, not as an expression.
+var pseudoNames = map[string]bool{unknownExpression: true, unknownStdin: true, unknownWrangler: true, unknownTooLong: true, unknownSecret: true}
+
+// command marks the output of a command. Two commands are two unknown
+// values, so the marker carries a hash of the command (never its text).
+func commandMark(text string) string {
+	return mark(unknownCommand + markHash + shortHash(strings.Join(strings.Fields(text), " ")))
+}
 
 func mark(name string) string { return markOpen + name + markClose }
 
@@ -131,7 +142,7 @@ func lexScript(s string) (cmds [][]shWord, subs []string) {
 				case s[i] == '$' && i+1 < len(s) && s[i+1] == '(':
 					end := balanced(i+2, '(', ')')
 					subs = append(subs, s[i+2:max(i+2, end-1)])
-					buf.WriteString(mark(unknownCommand))
+					buf.WriteString(commandMark(s[i+2 : max(i+2, end-1)]))
 					i = end
 				case s[i] == '`':
 					end := strings.IndexByte(s[i+1:], '`')
@@ -139,7 +150,7 @@ func lexScript(s string) (cmds [][]shWord, subs []string) {
 						end = len(s) - i - 1
 					}
 					subs = append(subs, s[i+1:i+1+end])
-					buf.WriteString(mark(unknownCommand))
+					buf.WriteString(commandMark(s[i+1 : i+1+end]))
 					i += end + 2
 				default:
 					buf.WriteByte(s[i])
@@ -160,7 +171,7 @@ func lexScript(s string) (cmds [][]shWord, subs []string) {
 		case c == '$' && i+1 < len(s) && s[i+1] == '(':
 			end := balanced(i+2, '(', ')')
 			subs = append(subs, s[i+2:max(i+2, end-1)])
-			buf.WriteString(mark(unknownCommand))
+			buf.WriteString(commandMark(s[i+2 : max(i+2, end-1)]))
 			inWord = true
 			i = end
 		case c == '$' && i+1 < len(s) && s[i+1] == '{':
@@ -174,7 +185,7 @@ func lexScript(s string) (cmds [][]shWord, subs []string) {
 				end = len(s) - i - 1
 			}
 			subs = append(subs, s[i+1:i+1+end])
-			buf.WriteString(mark(unknownCommand))
+			buf.WriteString(commandMark(s[i+1 : i+1+end]))
 			inWord = true
 			i += end + 2
 		case c == ' ' || c == '\t':
@@ -229,7 +240,9 @@ func isDigits(s string) bool {
 	return true
 }
 
-var shellVar = regexp.MustCompile(`\\\$|\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+// shellVar finds what a shell would replace: a named variable, or a
+// parameter the shell sets itself ($1, $@, $#, $?), which is never known.
+var shellVar = regexp.MustCompile(`\\\$|\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|\$([A-Za-z_][A-Za-z0-9_]*)|\$\{[0-9@*#?!][^}]*\}|\$[0-9@*#?!]`)
 
 // expandWord replaces $NAME and ${NAME} outside single quotes with what
 // lookup returns; a name lookup does not know becomes a marker.
@@ -246,6 +259,10 @@ func expandWord(w shWord, lookup func(name string) (string, bool)) string {
 			}
 			sub := shellVar.FindStringSubmatch(m)
 			name := sub[1] + sub[2]
+			if name == "" {
+				// "$1", "${@}": an argument of the script or function.
+				return mark("$" + strings.Trim(m[1:], "{}")[:1])
+			}
 			if v, ok := lookup(name); ok {
 				return v
 			}

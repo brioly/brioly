@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -343,5 +344,126 @@ func TestUnparsableWorkflowKeepsTheDeployPath(t *testing.T) {
 		if e.Type != diff.CoverageChanged {
 			t.Errorf("an unreadable workflow is reported as a change: %+v", e)
 		}
+	}
+}
+
+// A value shaped like a credential that ends up where a target's name is
+// read (through a variable, or written in place) is kept nowhere: not in
+// the attribute, not in the name, and not in the fact ID, which masking
+// never touches. And a snapshot made this way is one Clean accepts: such a
+// line cannot break `brioly sync`.
+func TestSecretShapedTargetNamesAreNotInIDs(t *testing.T) {
+	awsKey := "AKIA" + "Q3EGTBX7" + "NPR2WJKD"
+	workflow := `name: Deploy
+on: push
+env:
+  GH: ` + fakeToken + `
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: aws ecs update-service --cluster prod --service $GH
+      - run: aws ecs update-service --cluster prod --service svc-` + awsKey + `
+      - run: aws lambda update-function-code --function-name ` + fakeToken + `
+      - run: docker push ghcr.io/acme/` + fakeToken + `:1
+      - run: aws ecs update-service --cluster prod --service api
+`
+	snap, _ := runShop(t, workflow, nil)
+	raw, _ := json.Marshal(snap)
+	for _, secret := range []string{fakeToken, awsKey} {
+		if strings.Contains(string(raw), secret) {
+			t.Errorf("%q is in the snapshot", secret)
+		}
+	}
+	var names []string
+	for _, f := range snap.FactsOfKind("code.deploy_target") {
+		names = append(names, f.Name)
+		if strings.Contains(f.ID, "REDACTED") {
+			t.Errorf("ID %s", f.ID)
+		}
+	}
+	sort.Strings(names)
+	want := "Deploy to ECS service prod/(a value that looks like a secret), Deploy to ECS service prod/api, " +
+		"Deploy to Lambda function (a value that looks like a secret), Push of container image ghcr.io/(a value that looks like a secret)"
+	if got := strings.Join(names, ", "); got != want {
+		t.Errorf("targets = %s\nwant      %s", got, want)
+	}
+	// The target that is named plainly is still linked.
+	linked := false
+	for _, e := range snap.Edges {
+		linked = linked || e.Type == facts.EdgeDeploys && strings.HasSuffix(e.From, ":ecs_service:prod/api")
+	}
+	if !linked {
+		t.Error("the plainly named service is not linked")
+	}
+	files, err := render.Files(snap, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if strings.Contains(string(body), fakeToken) || strings.Contains(string(body), awsKey) {
+			t.Errorf("%s holds a planted value", name)
+		}
+	}
+	if _, err := Clean(snap, nil); err != nil {
+		t.Errorf("Clean refuses a snapshot the collector made: %v", err)
+	}
+}
+
+// What the documents say about a link is what the facts show: a condition
+// that is not evaluated, the cluster the workflow names, a role whose
+// sign-in the file does not show, and a path with no workload under it.
+func TestDeliveryWording(t *testing.T) {
+	workflow := `name: Deploy
+on: push
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with: {role-to-assume: "${{ secrets.ROLE }}", aws-region: ap-northeast-2}
+      - run: aws eks update-kubeconfig --name shop
+      - run: kubectl -n prod set image deployment/web web=$IMAGE
+      - run: kubectl apply -f deploy/crds
+      - run: kubectl rollout status deployment/other -n prod
+`
+	infra := shopInfrastructure()
+	cluster := facts.NewObserved("aws:arn:aws:eks:ap-northeast-2:111122223333:cluster/shop", "aws.eks.cluster", "shop",
+		facts.Source{Connector: "aws", Scope: "111122223333", Region: "ap-northeast-2"}, facts.SourceRef{Type: facts.RefARN, Value: "arn:aws:eks:ap-northeast-2:111122223333:cluster/shop"}, time.Unix(0, 0))
+	web := facts.NewObserved("k8s:"+cluster.ID+":prod/deployment/web", "k8s.workload", "web", facts.Source{Connector: "kubernetes", Scope: "shop"},
+		facts.SourceRef{Type: facts.RefKubernetes, Value: "shop/prod/Deployment/web"}, time.Unix(0, 0))
+	web.Attributes["workload_kind"], web.Attributes["namespace"] = "Deployment", "prod"
+	infra.Facts = append(infra.Facts, cluster, web)
+	infra.AddEdge(facts.EdgeRunsOn, web.ID, cluster.ID, nil)
+	infra.Coverage = append(infra.Coverage, facts.Coverage{Connector: "kubernetes", Scope: "shop", Kind: "k8s.workload", Status: facts.CoverageComplete},
+		facts.Coverage{Connector: "aws", Scope: "111122223333", Region: "ap-northeast-2", Kind: "aws.eks.cluster", Status: facts.CoverageComplete})
+
+	snap, err := Run(context.Background(), Options{Repos: []Repo{{Path: shopRepo(t, workflow)}}, Collected: []collect.Result{infra}, ID: "scan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := render.Files(snap, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arch := string(files[render.ArchitectureFile])
+	for _, want := range []string{
+		"Conditions (`if:`) are not evaluated: a step that is written is listed, and marked when it has one.",
+		"- **web** (Deployment in namespace `prod`) is deployed by workflow **Deploy** of **backend**, job `deploy`, conditionally (the job or step has a condition, which is not evaluated). It runs on push. " +
+			"Assumes an AWS role; how it signs in is not determinable from the file. " +
+			"Inferred: matched by kind, name and namespace in the cluster of the name the workflow gives (`shop`); a name does not prove it is the same cluster. — `.github/workflows/deploy.yml`",
+		"| Apply of Kubernetes manifests deploy/crds | no workload manifest found under that path | backend | Deploy | `deploy` (conditional) |",
+	} {
+		if !strings.Contains(arch, want) {
+			t.Errorf("architecture.md lacks %q\n%s", want, arch[strings.Index(arch, "## Delivery"):])
+		}
+	}
+	// Waiting for a rollout deploys nothing, and no condition is quoted.
+	if strings.Contains(arch, "other") || strings.Contains(arch, "refs/heads") || strings.Contains(arch, "does not say which cluster") {
+		t.Errorf("architecture.md:\n%s", arch[strings.Index(arch, "## Delivery"):])
+	}
+	if !strings.Contains(string(files[render.TechStackFile]), "signs in to AWS by assuming a role (with what is not determinable from the file)") {
+		t.Errorf("tech-stack.md:\n%s", files[render.TechStackFile])
 	}
 }

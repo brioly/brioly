@@ -416,11 +416,11 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 
 | kind | ID | structural | detail |
 |---|---|---|---|
-| `code.ci_workflow` | `{레포ID}:file:{경로}` (그대로) | `platform`, `triggers`(이벤트 이름), `trigger_filters`(`push branches: main` 같은 문자열. branches·tags·paths와 `-ignore`, types, workflows, schedule의 cron), `deploy_targets`(대상의 종류: `ecs`, `ecr`, `lambda`, `kubernetes`, …), `calls`(job이 호출하는 재사용 workflow. 다른 레포의 것은 `@ref` 없이 이름만), `environments`, `auth`(`aws:oidc`, `aws:static_keys`, `cloudflare:api_token`) | `actions` |
-| `code.deploy_target` | `{레포ID}:deploy:{workflow 경로}:{job}:{target_type}:{대상을 가리키는 값들}` | `target_type`, `job`, `environment`, `auth`(`oidc` / `static_keys` / `api_token`), `unresolved`, 대상을 가리키는 값(종류마다 다름: `cluster`·`service`, `function`, `bucket`, `distribution`, `stack`, `app`, `registry`·`image`, `namespace`·`workload_kind`·`workload`, `release`·`chart`, `path`·`kustomize`, `worker`, `project`), 파일이 직접 말할 때만 `region`·`account` | `recognized_by`(인식한 액션·명령), `role_to_assume`(리터럴 ARN 또는 `${{ secrets.X }}` 같은 이름), `defined_in`(호출된 workflow에 적힌 단계일 때 그 파일), `resolved_from`(이름을 읽은 다른 파일. 예: `wrangler.toml`) |
+| `code.ci_workflow` | `{레포ID}:file:{경로}` (그대로) | `platform`, `triggers`(이벤트 이름), `trigger_filters`(`push branches: main` 같은 문자열. branches·tags·paths와 `-ignore`, types, workflows, schedule의 cron. 패턴은 정렬해서 저장하므로 순서를 바꾸는 것은 변경이 아님), `deploy_targets`(대상의 종류: `ecs`, `ecr`, `lambda`, `kubernetes`, …), `calls`(job이 호출하는 재사용 workflow. 다른 레포의 것은 `@ref` 없이 이름만), `environments`, `auth`(`aws:oidc`, `aws:static_keys`, `cloudflare:api_token`) | `actions` |
+| `code.deploy_target` | `{레포ID}:deploy:{workflow 경로}:{job}:{target_type}:{대상을 가리키는 값들}` | `target_type`, `job`, `environment`, `conditional`(job이나 step에 `if:`가 있음. 조건식은 저장·평가하지 않음), `auth`(`oidc` / `static_keys` / `role` / `api_token`), `unresolved`, 대상을 가리키는 값(종류마다 다름: `cluster`·`service`, `function`, `bucket`, `distribution`, `stack`, `app`, `registry`·`image`, `namespace`·`workload_kind`·`workload`, `release`·`chart`, `path`·`kustomize`, `worker`, `project`), 파일이 직접 말할 때만 `region`·`account` | `recognized_by`(인식한 액션·명령), `role_to_assume`(리터럴 ARN 또는 `${{ secrets.X }}` 같은 이름), `defined_in`(호출된 workflow에 적힌 단계일 때 그 파일), `resolved_from`(이름을 읽은 다른 파일. 예: `wrangler.toml`) |
 
 - **이름(Name)**은 하는 일을 말합니다: `Deploy to ECS service prod/api`, `Push of container image shop/api (Amazon ECR)`, `Apply of Terraform in infra`. 변경 피드에서 리소스 자체와 헷갈리지 않게 하기 위해서입니다.
-- **ID에 들어가는 값**은 대상을 가리키는 값뿐입니다. 정해지지 않은 값은 그것이 달려 있는 이름의 짧은 해시(`~3fa9c1d2`)로 들어갑니다. job 이름을 바꾸면 다른 대상이고, 키 순서·따옴표·주석·줄 위치를 바꾸는 것은 변경이 아닙니다. 같은 job의 여러 단계가 같은 대상을 가리키면(`kubectl set image` 뒤의 `rollout status`, matrix 조합) 한 사실입니다.
+- **ID에 들어가는 값**은 대상을 가리키는 값뿐입니다. ID의 각 부분(workflow 경로, job, 값)은 `:`로, 값들은 `/`로 잇습니다. 값은 `A-Za-z0-9._@+=-`만으로 되어 있을 때만 그대로 쓰고(`/`는 workflow 경로와 마지막 값인 이미지 경로·파일 경로에서만 허용), 그 밖의 값(한글, 공백, `:`, 다른 자리의 `/`)과 정해지지 않은 값은 **그 값의 해시**(`~3fa9c1d2e4b5`)로 씁니다. 글자를 하나씩 바꾸지 않으므로 서로 다른 값이 같은 ID가 되지 않습니다(`배포.yml`과 `검증.yml`, `deploy prod.yml`과 `deploy_prod.yml`, cluster `a/b`+service `c`와 `a`+`b/c`). 정해지지 않은 값의 해시에는 식·명령의 해시가 들어가서 서로 다른 `$(…)`나 식은 서로 다른 대상입니다(본문은 저장하지 않음). 만에 하나 같은 ID가 둘 나오면 하나를 빼고 coverage에 적으며 스캔은 계속합니다. job 이름을 바꾸면 다른 대상이고, 키 순서·따옴표·주석·줄 위치를 바꾸는 것은 변경이 아닙니다. 같은 job의 여러 단계가 같은 대상을 가리키면(`kubectl set image` 뒤의 `rollout restart`, matrix 조합) 한 사실입니다.
 - **배포로 바뀌는 값은 수집하지 않습니다.** 이미지 tag, 커밋 SHA, 실행 번호, 액션의 `@버전`, step 출력은 어느 등급에도 없습니다. 줄 번호는 `source_ref`에만 있고(해시·문서에 쓰지 않음), 문서의 근거는 파일 경로입니다.
 - **관계(수집기, observed)**: 레포 `contains` workflow, workflow `contains` 배포 대상, 호출하는 workflow `uses` 같은 레포의 호출되는 workflow.
 - **coverage**: 레포마다 `code.ci_workflow`와 `code.deploy_target` 항목을 항상 남깁니다(workflow가 없는 레포도 `complete`. 그래야 workflow를 지운 것이 삭제로 잡힘). 파싱되지 않는 파일이 있으면 두 항목이 `partial`이 되고 Detail에 `경로: not valid YAML (line N)`만 적습니다(파서의 문구는 파일 내용을 인용할 수 있어 옮기지 않음). 스캔은 실패하지 않고, 레포의 나머지(`code`)는 `complete`로 남으며, 이전 스캔이 읽은 workflow 사실은 `CarryForward`로 유지됩니다("not read in this scan").
@@ -435,7 +435,7 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 | `lambda_function` | `aws lambda update-function-code`, `aws-actions/aws-lambda-deploy`, `appleboy/lambda-action` | function (ARN, `이름:alias` 정규화) |
 | `container_image` | `docker push`, `docker buildx build --push`, `docker/build-push-action`(`push`가 적혀 있고 false가 아닐 때. `docker/metadata-action`의 `images`를 따라감) | registry, image(tag·digest 제외). `aws-actions/amazon-ecr-login`의 `registry` 출력은 registry `ecr`("이 job이 로그인한 ECR") |
 | `s3_bucket`, `cloudfront_distribution` | `aws s3 sync`/`cp`(목적지가 `s3://`일 때), `jakejarvis/s3-sync-action`, `aws cloudfront create-invalidation` | bucket, distribution |
-| `kubernetes_workload` | `kubectl set image`, `kubectl rollout restart`/`status` | workload_kind(Deployment 등), workload, namespace(적었을 때), cluster(같은 job의 `aws eks update-kubeconfig --name`) |
+| `kubernetes_workload` | `kubectl set image`, `kubectl rollout restart` (`rollout status`는 기다리는 것이지 배포가 아니라서 인식하지 않음) | workload_kind(Deployment 등), workload, namespace(적었을 때), cluster(같은 job의 `aws eks update-kubeconfig --name`) |
 | `kubernetes_manifests` | `kubectl apply -f`/`-k`, `azure/k8s-deploy` | 레포 안의 경로(`working-directory`, `cd` 반영). URL은 대상이 아님. `-f -`는 "stdin"에 달림 |
 | `helm_release` | `helm upgrade`, `helm install` | release, namespace, chart |
 | `cloudflare_worker`, `cloudflare_pages_project` | `cloudflare/wrangler-action`, `wrangler deploy`, `wrangler pages deploy`, `cloudflare/pages-action` | 이름. `--name`이 없으면 작업 디렉터리의 `wrangler.toml`/`.json`/`.jsonc`에서 읽음(`--env`면 그 환경의 이름 또는 `이름-환경`) |
@@ -443,7 +443,7 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 | `cloudformation_stack`, `codedeploy_application`, `elastic_beanstalk_environment`, `serverless_framework`, `sam`, `cdk` | `aws cloudformation deploy`, `aws-actions/aws-cloudformation-github-deploy`, `aws deploy create-deployment`, `eb deploy`, `serverless deploy`, `sam deploy`, `cdk deploy` | stack / app / 디렉터리 |
 | `github_release`, `github_pages`, `vercel`, `cloud_run_service`, `azure_web_app`, `argocd_application` | `gh release create`, `softprops/action-gh-release`, `goreleaser`, `actions/deploy-pages`, `vercel --prod`, `gcloud run deploy`, `azure/webapps-deploy`, `argocd app sync` | 이름이 있으면 이름 |
 
-인증 방식은 `aws-actions/configure-aws-credentials`(`role-to-assume`만 있으면 `oidc`, `aws-access-key-id`가 있으면 `static_keys`), workflow·job·step의 `env:`에 `AWS_ACCESS_KEY_ID`라는 **이름**이 있는지(`static_keys`), Cloudflare의 `apiToken` 입력이나 `CLOUDFLARE_API_TOKEN` 이름(`api_token`)에서 읽습니다.
+인증 방식(`auth`)은 파일이 보여주는 만큼만 말합니다. `oidc`: `aws-actions/configure-aws-credentials`에 `role-to-assume`이 있고, 그 job에서 그 전에 access key를 쓴 적이 없고, job(없으면 workflow)의 `permissions`에 `id-token: write`가 있을 때. `static_keys`: `aws-access-key-id` 입력이 있거나 workflow·job·step의 `env:`에 `AWS_ACCESS_KEY_ID`라는 **이름**이 있을 때. 한 번 key를 쓴 job은 그 뒤에 role을 수임해도(`role-chaining` 포함) `static_keys`입니다. `role`: role을 수임하지만 무엇으로 로그인하는지 파일로 알 수 없을 때(`id-token` 권한이 없음, `web-identity-token-file`, 앞선 자격 증명 없이 `role-chaining`). Cloudflare는 `apiToken` 입력이나 `CLOUDFLARE_API_TOKEN` 이름이 있으면 `api_token`. ECR 이미지의 `account`는 `amazon-ecr-login`의 `registries` 입력이 계정 하나를 리터럴로 적었을 때만 채웁니다(role의 계정으로 채우지 않음: registry와 role의 계정은 다를 수 있음).
 
 ### 이름은 파일이 말하는 것만
 
@@ -461,11 +461,36 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 
 ### secret
 
-- `run:` 스크립트 본문과 `env:` 값은 저장하지 않습니다. 인식기가 꺼낸 이름(서비스 이름, 버킷 이름 등)만 저장합니다. `with:`의 다른 입력(`apiToken` 등)도 저장하지 않습니다(있다는 사실만 `auth`).
-- secret·variable의 **이름**(`secrets.DEPLOY_ROLE`)은 저장합니다. 값이 아니고, 파일을 읽는 것으로는 값을 알 수 없습니다.
+- `run:` 스크립트 본문은 저장하지 않습니다.
+- `env:` 값, 스크립트가 정한 변수의 값, matrix 값은 **한 경우에만** 저장됩니다: 인식된 배포 단계가 그 값을 대상의 이름으로 쓸 때(예: `ECS_SERVICE: api` → `service: api`). 그때도 다음이면 저장하지 않고 "정해지지 않음"으로 둡니다.
+  - 그 값을 담은 것의 **이름**이 secret처럼 보일 때(대소문자 무시, `PASSWORD`·`PASSWD`·`PASSPHRASE`·`SECRET`·`TOKEN`·`KEY`·`CREDENTIAL`·`PRIVATE`·`AUTH`·`CERT`·`SIGNATURE`를 포함. `env:`, 스크립트 변수, matrix 키, 입력 이름 모두). 넓게 막습니다(`S3_KEY_PREFIX`도 막힘). 문서에는 `env.DB_PASSWORD`, `$DB_PASSWORD`처럼 이름만 나옵니다.
+  - 값이 gitleaks 규칙에 걸릴 때(그 속성의 값으로, 그리고 이름·ID 전체로 다시 확인). 값 자리에 `(a value that looks like a secret)`를 쓰고 ID에는 넣지 않습니다. ID는 저장 뒤에 마스킹되지 않으므로, 마스킹될 값은 처음부터 ID에 들어가지 않아야 합니다. 그래도 ID 전체가 규칙에 걸리면 ID를 해시(`{레포ID}:deploy:~…`)로 바꿉니다. 수집기가 만든 스냅샷을 `scan.Clean`이 "ID가 secret처럼 보인다"며 거절하는 일이 없게 하기 위해서입니다.
+  - 256바이트를 넘을 때(`(a value too long to be a name)`).
+- 남는 틈: secret처럼 보이지 않는 이름의 변수에 gitleaks가 모르는 모양의 비밀번호를 넣고 그것을 대상 이름 자리에 쓰면(`DB: hunter2` + `--function-name fn-$DB`) 구별할 수 없어 이름으로 저장됩니다.
+- `with:`의 다른 입력(`apiToken` 등)은 저장하지 않습니다(있다는 사실만 `auth`). 이미지 주소나 `uses: docker://…`에 적힌 `user:password@`는 버립니다.
+- secret·variable의 **이름**(`secrets.DEPLOY_ROLE`)은 저장합니다. 값이 아니고, 파일을 읽는 것으로는 값을 알 수 없습니다. 식 안의 문자열 리터럴과 `if:` 조건식의 본문은 저장하지 않습니다.
 - 속성 이름으로 `credentials`를 쓰지 않는 이유: `pkg/redact`가 그런 이름의 값을 통째로 가립니다. 그래서 `auth`입니다.
 - 그 뒤에 다른 사실과 똑같이 gitleaks 마스킹을 거칩니다.
-- 테스트: 같은 입력이면 같은 해시, 배포가 바꾸는 것(액션 SHA 고정, 이미지 tag, 실행 번호, 주석)으로 해시와 ID가 바뀌지 않음, 키 순서를 바꿔도 같음, `env:`·`run:`·`with:`·식 안에 심은 가짜 토큰이 사실과 문서 어디에도 없음.
+- 테스트: 같은 입력이면 같은 해시, 배포가 바꾸는 것(액션 SHA 고정, 이미지 tag, 실행 번호, 주석)으로 해시와 ID가 바뀌지 않음, 키 순서를 바꿔도 같음, `env:`·`run:`·`with:`·식 안에 심은 가짜 토큰이 사실과 문서 어디에도 없음, secret 이름의 변수 값이 어디에도 없음, 토큰 모양의 값이 ID에 없고 `scan.Clean`이 받아들임.
+
+### 한도
+
+레포는 작다고 믿을 수 없고, 몇백 바이트짜리 workflow가 끝없는 일을 시킬 수 있습니다(두 배씩 커지는 변수, 자기 자신을 가리키는 `env`, matrix × 수십 단계). 그래서 읽는 양을 세고 모든 값의 길이를 묶습니다.
+
+| 한도 | 값 |
+|---|---|
+| workflow 파일 하나 | 1 MB (넘으면 읽지 않음) |
+| 레포의 workflow 파일 합계 | 8 MB (이름 순으로 읽다가 넘는 파일부터 읽지 않음) |
+| 해석하고 단어로 나누는 스크립트·값의 양 | workflow 하나(호출하는 것 포함) 4 MB, 레포 24 MB |
+| job·matrix 조합 | 레포 5000 (matrix를 참조하지 않는 job은 조합을 하나로 봄) |
+| job의 step | 300 |
+| `run:` 스크립트 하나 | 128 KB (넘으면 그 스크립트만 읽지 않음) |
+| 값(이름) 하나 | 256바이트, 정해지지 않은 부분 4개까지 |
+| 레포의 배포 대상 | 1000 |
+
+- `env` 값은 step마다 한 번만 해석하고, 자기 자신으로 돌아오는 값은 "정해지지 않음"입니다. wrangler 설정 파일은 경로마다 한 번만 읽습니다. gitleaks에 묻는 것도 값마다 한 번입니다.
+- 한도에 닿으면 거기까지 읽은 것은 두고, coverage를 `partial`로 남기며 Detail에 **어느 한도인지**를 적습니다(`…/x.yml: reading stopped at a limit (4 MB of scripts and values per workflow); deploy targets beyond it are missing`). 같은 파일이면 항상 같은 곳에서 멈추고 같은 사실이 나옵니다(파일 이름 순, 고정된 한도).
+- **한도에 계속 닿는 레포의 결과**: 그 레포의 `code.ci_workflow`·`code.deploy_target`은 고칠 때까지 `partial`입니다. 그동안 (1) 그 레포의 workflow에서 지운 배포 대상이 "not read in this scan"으로 남고(지워진 것인지 한도 밖으로 밀린 것인지 구별할 수 없음), (2) `diff`가 그 레포의 변경 이벤트를 내지 않습니다(`partial` 영역의 기존 규칙). 한도는 실제 workflow가 닿지 않을 만큼 크게 잡았고, 닿는 파일은 문서의 "Incomplete scan"에 이름이 나옵니다. 측정: 모든 한도에 닿는 레포를 읽는 데 빠른 코어에서 약 2.5초.
 
 ### 연결 (`pkg/components/deploy.go`)
 
@@ -482,6 +507,7 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 
 - **후보가 없으면** 잇지 않고, 문서에 "workflow에 이름이 있지만 읽은 것 중에는 없음"으로 적습니다(스캔하지 않는 계정·리전·클러스터에 있을 수 있음).
 - **후보가 둘 이상이면**(같은 이름의 서비스가 두 리전에, 같은 경로의 이미지가 두 계정의 ECR에) 고르지 않습니다. 경고를 내고, 문서에 후보를 모두 적습니다.
+- **매니페스트 경로에 워크로드가 없으면** "그 경로에서 워크로드 매니페스트를 찾지 못함"으로 적습니다(스캔하지 않는 곳에 있을 수 있다는 문구는 맞지 않음: 경로는 레포 안).
 - **이름이 정해지지 않은 대상**은 잇지 않습니다("파일로는 알 수 없음: `vars.X`에 달림").
 - **brioly가 읽지 않는 종류**(S3, CloudFront, Helm release, Terraform 등)는 "이 종류의 리소스는 읽지 않음"으로 적습니다.
 - `components.DeployStatuses(snapshot)`가 대상마다 이 판정을 돌려줍니다(문서가 이유를 쓰는 데 씀).
@@ -489,7 +515,7 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 **컴포넌트** (ID는 그대로 앵커에서 나오고, 아래는 멤버 규칙):
 - 워크로드 컴포넌트는 자기 멤버를 배포하거나 그 이미지를 push하는 배포 대상과, 그 대상이 든 workflow를 멤버로 갖습니다.
 - 어디에도 연결되지 않은 대상은 그 레포가 속한 컴포넌트에 남습니다(레포 확장 규칙에 추가).
-- **레포가 컴포넌트의 코드라는 근거로 쓰는 경우**는 둘뿐입니다. (1) 레포의 workflow가 push하는 이미지를 **그 컴포넌트만** 실행한다(모노레포가 여러 컴포넌트의 이미지를 만들면 각각의 코드. 여러 컴포넌트가 함께 쓰는 사이드카 이미지는 근거가 아님). (2) 이미지를 만들지는 않지만 그 컴포넌트를 배포하고, **그 레포가 배포하는 워크로드 컴포넌트가 그것 하나뿐**이다(여러 컴포넌트를 배포만 하는 레포는 배포를 돌리는 곳일 가능성이 커서 근거로 쓰지 않음). 근거가 가리키는 레포가 하나면 이름 일치 규칙보다 먼저 적용하고, 둘 이상이면 경고 후 이름 일치 규칙으로 넘어갑니다.
+- **레포가 컴포넌트의 코드라는 근거**는 둘이고 무게가 다릅니다. (1) 레포의 workflow가 push하는 이미지를 **그 컴포넌트만** 실행한다(모노레포가 여러 컴포넌트의 이미지를 만들면 각각의 코드. 여러 컴포넌트가 함께 쓰는 사이드카 이미지는 근거가 아님). 이 근거가 레포 하나를 가리키면 이름과 상관없이 그 레포입니다. (2) 이미지를 만들지는 않지만 그 컴포넌트를 배포하고, **그 레포가 배포하는 워크로드 컴포넌트가 그것 하나뿐**이다. 이 근거는 **이름 일치보다 약합니다**: 이름이 정확히 맞는 레포가 하나 있으면 그 레포가 코드이고(배포만 하는 레포는 배포를 돌리는 곳일 수 있음), 이름으로 정해지지 않을 때(후보 없음, 또는 후보 여럿 중 하나가 배포하는 레포)만 씁니다.
 
 ### 문서와 변경 중요도
 
@@ -502,7 +528,7 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 ### 한계
 
 - 인식 표에 없는 액션, composite action, 단계가 부르는 스크립트(`./deploy.sh`, `make deploy`, npm script)는 보지 못합니다.
-- `if:` 조건은 보지 않습니다. 단계가 적혀 있으면 대상입니다. `paths` 필터는 트리거에 그대로 적을 뿐, 어느 대상이 어느 경로에 묶이는지는 해석하지 않습니다.
+- `if:` 조건은 평가하지 않습니다. 단계가 적혀 있으면 대상이고, job이나 step에 조건이 있으면 `conditional`로 표시해 문서에 "conditionally"라고 씁니다. 셸 함수의 인자(`$1`, `$@`)는 정해지지 않은 값입니다. `paths` 필터는 트리거에 그대로 적을 뿐, 어느 대상이 어느 경로에 묶이는지는 해석하지 않습니다.
 - 다른 CI, 클러스터 안의 Argo CD·Flux, Terraform 리소스(workflow 단계가 아닌)로 하는 배포는 workflow 파일에 없습니다.
 - Helm release는 클러스터의 워크로드와 잇지 않습니다(클러스터에서 release 라벨을 읽지 않음).
 - `echo aws ecs …`처럼 따옴표 없이 명령을 출력만 하는 줄, heredoc 본문의 줄은 명령으로 읽힐 수 있습니다.

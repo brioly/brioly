@@ -43,6 +43,7 @@ const (
 	DeployAmbiguous    = "ambiguous"    // several resources have that name: none is picked
 	DeployUndetermined = "undetermined" // the file does not settle the name
 	DeployNotRead      = "not_read"     // brioly does not read this kind of resource
+	DeployNoManifest   = "no_manifest"  // manifests are applied from a path where no workload manifest was found
 )
 
 // DeployStatus says how a deploy target relates to what the snapshot holds.
@@ -194,6 +195,7 @@ func DeployStatuses(s *facts.Snapshot) map[string]DeployStatus {
 					found = append(found, m)
 				}
 			}
+			st.State = DeployNoManifest
 			if len(found) > 0 {
 				st = DeployStatus{State: DeployLinked, producer: ProducerDeployManifest}
 			}
@@ -336,7 +338,10 @@ func repositoryOf(ix *index, target string) string {
 }
 
 // deployEvidence returns, for each workload component (by anchor), the
-// repositories whose workflows show them to be its code.
+// repositories whose workflows show them to be its code: those that build
+// its image, and those that only deploy it. The two are not worth the
+// same: building the image a component runs is what "its code" means,
+// while deploying it is also what a repository of deploy scripts does.
 //
 //   - A repository that pushes an image only this component runs is its
 //     code, however many other components the repository also builds (a
@@ -346,7 +351,7 @@ func repositoryOf(ix *index, target string) string {
 //     is its code only when this is all it deploys: a repository that
 //     deploys many components is more likely the place deploys are run
 //     from than the code of each.
-func deployEvidence(ix *index, comps map[string]*facts.Component) map[string][]string {
+func deployEvidence(ix *index, comps map[string]*facts.Component) (byImage, byDeploy map[string][]string) {
 	type link struct{ anchor, repo string }
 	componentsOf := map[string]map[string]bool{} // target -> anchors of the components it leads to
 	deploys := map[string]bool{}                 // targets that deploy (not image pushes)
@@ -389,27 +394,27 @@ func deployEvidence(ix *index, comps map[string]*facts.Component) map[string][]s
 			}
 		}
 	}
-	found := map[string]map[string]bool{}
-	add := func(l link) {
-		if found[l.anchor] == nil {
-			found[l.anchor] = map[string]bool{}
+	collect := func(links []link, keep func(link) bool) map[string][]string {
+		found := map[string]map[string]bool{}
+		for _, l := range links {
+			if !keep(l) {
+				continue
+			}
+			if found[l.anchor] == nil {
+				found[l.anchor] = map[string]bool{}
+			}
+			found[l.anchor][l.repo] = true
 		}
-		found[l.anchor][l.repo] = true
-	}
-	for _, l := range images {
-		add(l)
-	}
-	for _, l := range plain {
-		if len(deployed[l.repo]) == 1 {
-			add(l)
+		out := map[string][]string{}
+		for anchor, repos := range found {
+			for r := range repos {
+				out[anchor] = append(out[anchor], r)
+			}
+			sort.Strings(out[anchor])
 		}
+		return out
 	}
-	out := map[string][]string{}
-	for anchor, repos := range found {
-		for r := range repos {
-			out[anchor] = append(out[anchor], r)
-		}
-		sort.Strings(out[anchor])
-	}
-	return out
+	byImage = collect(images, func(link) bool { return true })
+	byDeploy = collect(plain, func(l link) bool { return len(deployed[l.repo]) == 1 })
+	return byImage, byDeploy
 }

@@ -340,26 +340,25 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 		}
 	}
 	linked := map[string]bool{}
-	evidence := deployEvidence(ix, comps)
+	byImage, byDeploy := deployEvidence(ix, comps)
 	for _, anchor := range sortedAnchors(comps) {
 		c := comps[anchor]
 		if c.Role != RoleWorkload {
 			continue
 		}
-		// A workflow that deploys the workload or pushes its image says
-		// more than a name does: when it points at one repository, that
-		// is the one, whatever the names are.
-		switch byDeploy := evidence[anchor]; len(byDeploy) {
-		case 0:
-		case 1:
-			r := byDeploy[0]
+		link := func(r, producer string) {
 			c.Members = append(c.Members, r)
 			linked[r] = true
 			s.Edges = append(s.Edges, facts.NewEdge(facts.EdgeBuiltFrom, c.Anchor, r,
-				facts.Derivation{Type: facts.Inferred, Evidence: []string{c.Anchor, r}, Producer: ProducerDeployPath}, nil))
+				facts.Derivation{Type: facts.Inferred, Evidence: []string{c.Anchor, r}, Producer: producer}, nil))
+		}
+		// The repository whose workflow pushes the image this component
+		// alone runs is its code, whatever the two are called.
+		if built := byImage[anchor]; len(built) == 1 {
+			link(built[0], ProducerDeployPath)
 			continue
-		default:
-			warnings = append(warnings, fmt.Sprintf("workflows in %d repositories deploy component %q or push its image; link the right one with \"add\" in the components file", len(byDeploy), c.Name))
+		} else if len(built) > 1 {
+			warnings = append(warnings, fmt.Sprintf("workflows in %d repositories push the image of component %q; link the right one with \"add\" in the components file", len(built), c.Name))
 		}
 		candidates := map[string]bool{}
 		for _, n := range workloadNames(ix, c) {
@@ -367,17 +366,25 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 				candidates[r] = true
 			}
 		}
-		switch len(candidates) {
-		case 0:
-		case 1:
+		// A repository that only deploys the component (and nothing else)
+		// says less than a name that fits exactly one repository: that one
+		// may be where deploys are run from. It decides only where names
+		// decide nothing, or between repositories of the same name.
+		deployer := ""
+		if d := byDeploy[anchor]; len(d) == 1 {
+			deployer = d[0]
+		}
+		switch {
+		case len(candidates) == 1:
 			for r := range candidates {
-				c.Members = append(c.Members, r)
-				linked[r] = true
-				s.Edges = append(s.Edges, facts.NewEdge(facts.EdgeBuiltFrom, c.Anchor, r,
-					facts.Derivation{Type: facts.Inferred, Evidence: []string{c.Anchor, r}, Producer: ProducerNameMatch}, nil))
+				link(r, ProducerNameMatch)
 			}
-		default:
+		case deployer != "" && (len(candidates) == 0 || candidates[deployer]):
+			link(deployer, ProducerDeployPath)
+		case len(candidates) > 1:
 			warnings = append(warnings, fmt.Sprintf("component %q matches %d repositories by name; link the right one with \"add\" in the components file", c.Name, len(candidates)))
+		case len(byDeploy[anchor]) > 1:
+			warnings = append(warnings, fmt.Sprintf("workflows in %d repositories deploy component %q; link the right one with \"add\" in the components file", len(byDeploy[anchor]), c.Name))
 		}
 	}
 	for _, f := range s.Facts {

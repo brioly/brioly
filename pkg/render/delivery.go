@@ -50,6 +50,8 @@ func signsIn(t facts.Fact) string {
 	switch strAttr(t, "auth") {
 	case "oidc":
 		return "Signs in" + where + " through GitHub's OIDC provider (a role, no stored key)."
+	case "role":
+		return "Assumes an AWS role; how it signs in is not determinable from the file."
 	case "static_keys":
 		return "Signs in" + where + " with access keys stored as secrets."
 	case "api_token":
@@ -83,14 +85,24 @@ func resourceKind(f facts.Fact) string {
 
 // inferredBy says what a link made from names rests on, and what the
 // workflow would have had to state for it to be certain.
-func inferredBy(t facts.Fact) string {
+func inferredBy(t, linked facts.Fact) string {
 	switch strAttr(t, "target_type") {
 	case "ecs_service":
 		return "Inferred: matched by the cluster and service names; the workflow does not state both the account and the region."
 	case "lambda_function":
 		return "Inferred: matched by the function name; the workflow does not state both the account and the region."
 	case "kubernetes_workload":
-		return "Inferred: matched by kind and name (and namespace, when the workflow states it); the workflow does not identify the cluster."
+		by := "kind and name"
+		if strAttr(t, "namespace") != "" {
+			by = "kind, name and namespace"
+		}
+		if !live(linked) {
+			return "Inferred: matched by " + by + " to a manifest in a repository; no cluster that was read runs it."
+		}
+		if cluster := strAttr(t, "cluster"); cluster != "" {
+			return "Inferred: matched by " + by + " in the cluster of the name the workflow gives (" + code(cluster) + "); a name does not prove it is the same cluster."
+		}
+		return "Inferred: matched by " + by + "; the workflow does not say which cluster."
 	case "cloudflare_worker", "cloudflare_pages_project":
 		return "Inferred: matched by name; the workflow does not state the Cloudflare account."
 	}
@@ -141,6 +153,9 @@ func (d delivery) from() string {
 	if env := strAttr(d.target, "environment"); env != "" {
 		s += ", environment " + code(env)
 	}
+	if boolAttr(d.target, "conditional") {
+		s += ", conditionally (the job or step has a condition, which is not evaluated)"
+	}
 	return s
 }
 
@@ -157,7 +172,8 @@ func writeDelivery(b *strings.Builder, g *graph) {
 	b.WriteString("## Delivery\n\n" +
 		"Which repository deploys what, read from the GitHub Actions workflow files of the scanned repositories. " +
 		"A deploy target is linked to a resource only by the names the workflow file states. " +
-		"A name the file does not settle (a repository variable, a secret, the output of a step) is shown as what it depends on, not guessed.\n\n")
+		"A name the file does not settle (a repository variable, a secret, the output of a step) is shown as what it depends on, not guessed. " +
+		"Conditions (`if:`) are not evaluated: a step that is written is listed, and marked when it has one.\n\n")
 
 	var lines []string
 	var unlinked []delivery
@@ -205,7 +221,7 @@ func writeDelivery(b *strings.Builder, g *graph) {
 				linked = true
 				line := fmt.Sprintf("- **%s** (%s) is deployed by %s.%s", displayName(r), resourceKind(r), d.from(), tail)
 				if g.isInferred(t.ID, facts.EdgeDeploys, r.ID) {
-					line += " " + inferredBy(t)
+					line += " " + inferredBy(t, r)
 				}
 				lines = append(lines, line+" — "+evidence(t))
 			}
@@ -235,6 +251,8 @@ func writeDelivery(b *strings.Builder, g *graph) {
 			why = "not determinable from the file: depends on " + strings.Join(names, ", ")
 		case components.DeployNotRead:
 			why = "brioly does not read this kind of resource"
+		case components.DeployNoManifest:
+			why = "no workload manifest found under that path"
 		case components.DeployAmbiguous:
 			var names []string
 			for _, id := range st.Matches {
@@ -244,8 +262,12 @@ func writeDelivery(b *strings.Builder, g *graph) {
 			}
 			why = fmt.Sprintf("%d resources that were read fit that name, and none is picked: %s", len(names), strings.Join(names, ", "))
 		}
+		job := code(strAttr(t, "job"))
+		if boolAttr(t, "conditional") {
+			job += " (conditional)"
+		}
 		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s | %s |\n", mdEscape(displayName(t)), mdEscape(why), mdEscape(displayName(d.repo)),
-			mdEscape(displayName(d.workflow)), code(strAttr(t, "job")), mdEscape(when(d.workflow)), evidence(t))
+			mdEscape(displayName(d.workflow)), job, mdEscape(when(d.workflow)), evidence(t))
 	}
 	b.WriteString("\n")
 }
@@ -286,6 +308,7 @@ func writeWorkflowDetail(b *strings.Builder, g *graph, wf facts.Fact) {
 	if auth := listAttr(wf, "auth"); len(auth) > 0 {
 		words := map[string]string{
 			"aws:oidc": "AWS through GitHub's OIDC provider (a role, no stored key)", "aws:static_keys": "AWS with access keys stored as secrets",
+			"aws:role":             "AWS by assuming a role (with what is not determinable from the file)",
 			"cloudflare:api_token": "Cloudflare with an API token stored as a secret",
 		}
 		var as []string

@@ -135,13 +135,15 @@ var Kinds = map[string]Kind{
 	// fields that name it depend on the type (cluster and service, function,
 	// registry and image, ...). A name the file does not settle is written as
 	// what it depends on ("${{ vars.ECS_SERVICE }}") and listed in
-	// unresolved. auth is how the job signs in to where the target is:
-	// "oidc", "static_keys" or "api_token" (the word "credentials" is not
+	// unresolved. conditional says the job or step is under an if:, which
+	// is not evaluated. auth is how the job signs in to where the target is:
+	// "oidc", "static_keys", "role" (a role is assumed and the file does not
+	// show with what) or "api_token" (the word "credentials" is not
 	// used as a key: values under such a key are masked). Nothing here
 	// changes on a run of the workflow: no commit, tag, run number or step
 	// output is kept.
 	"code.deploy_target": {
-		Structural: []string{"target_type", "job", "environment", "auth", "unresolved",
+		Structural: []string{"target_type", "job", "environment", "conditional", "auth", "unresolved",
 			"cluster", "service", "function", "bucket", "distribution", "stack", "app", "registry", "image",
 			"namespace", "workload_kind", "workload", "release", "chart", "path", "kustomize", "worker", "project",
 			"region", "account"},

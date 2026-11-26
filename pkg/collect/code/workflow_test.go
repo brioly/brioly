@@ -537,8 +537,8 @@ jobs:
 	want := []string{
 		"Deploy to ECS service prod/api auth=oidc region=eu-west-1 account=111122223333 cluster=prod",
 		"Deploy to ECS service prod/worker auth=static_keys region=ap-northeast-2 cluster=prod",
-		"Deploy to Kubernetes workload prod/Deployment/api auth=oidc cluster=shop-prod",
-		"Deploy to Lambda function resize auth=oidc",
+		"Deploy to Kubernetes workload prod/Deployment/api auth=role cluster=shop-prod",
+		"Deploy to Lambda function resize auth=role",
 		"Deploy to Lambda function thumbs",
 		"Deploy to S3 bucket acme-site auth=static_keys region=us-east-1",
 	}
@@ -547,7 +547,7 @@ jobs:
 		t.Errorf("targets:\n got  %s\n want %s", strings.Join(got, "\n      "), strings.Join(want, "\n      "))
 	}
 	wf := workflowOf(t, res)
-	if got := jsonOf(wf.Attributes["auth"]); got != `["aws:oidc","aws:static_keys"]` {
+	if got := jsonOf(wf.Attributes["auth"]); got != `["aws:oidc","aws:role","aws:static_keys"]` {
 		t.Errorf("auth = %s", got)
 	}
 	for _, f := range res.Facts {
@@ -897,7 +897,7 @@ func TestLexScript(t *testing.T) {
 	want := []string{
 		"FOO=1·aws·s3·sync·./my dist·s3://b/$x·--delete", "tee·log",
 		"if·!·kubectl·apply·-f·a.yaml", "then·exit·1", "fi",
-		"X=\x01$(...)\x02", "echo·\x01$X\x02",
+		"X=\x01$(...)\x04" + shortHash("aws sts get-caller-identity") + "\x02", "echo·\x01$X\x02",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("commands:\n got  %q\n want %q", got, want)
@@ -919,13 +919,14 @@ func TestWorkflowReadingIsBounded(t *testing.T) {
 	files[".github/workflows/loop-a.yml"] = "on: workflow_call\njobs:\n  a:\n    uses: ./.github/workflows/loop-b.yml\n"
 	files[".github/workflows/loop-b.yml"] = "on: push\njobs:\n  b:\n    uses: ./.github/workflows/loop-a.yml\n  self:\n    uses: ./.github/workflows/loop-b.yml\n"
 	wide := "    strategy:\n      matrix:\n        a: [1, 2, 3, 4, 5, 6, 7, 8]\n        b: [1, 2, 3, 4, 5, 6, 7, 8]\n"
-	files[".github/workflows/wide-1.yml"] = "on: push\njobs:\n  j:\n" + wide + "    uses: ./.github/workflows/wide-2.yml\n"
-	files[".github/workflows/wide-2.yml"] = "on: workflow_call\njobs:\n  j:\n" + wide + "    uses: ./.github/workflows/wide-3.yml\n"
+	pass := "    with:\n      a: ${{ matrix.a }}\n"
+	files[".github/workflows/wide-1.yml"] = "on: push\njobs:\n  j:\n" + wide + "    uses: ./.github/workflows/wide-2.yml\n" + pass
+	files[".github/workflows/wide-2.yml"] = "on: workflow_call\njobs:\n  j:\n" + wide + "    uses: ./.github/workflows/wide-3.yml\n" + pass
 	files[".github/workflows/wide-3.yml"] = "on: workflow_call\njobs:\n  j:\n" + wide + "    runs-on: x\n    steps:\n      - run: aws lambda update-function-code --function-name f-${{ matrix.a }}\n"
 	res := collectFiles(t, files)
 	partial := false
 	for _, c := range res.Coverage {
-		partial = partial || c.Kind == "code.deploy_target" && c.Status == facts.CoveragePartial && strings.Contains(c.Detail, "more job combinations than are followed")
+		partial = partial || c.Kind == "code.deploy_target" && c.Status == facts.CoveragePartial && strings.Contains(c.Detail, "5000 job and matrix combinations per repository")
 	}
 	if !partial {
 		t.Errorf("the walk that was cut short is not recorded: %+v", res.Coverage)

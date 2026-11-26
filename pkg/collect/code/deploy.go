@@ -175,7 +175,17 @@ func normalize(f *found) {
 		}
 		fl["bucket"] = b
 	case "container_image":
-		repo, _ := collect.SplitImage(strings.TrimSpace(fl["image"]))
+		// An image is named "host/path:tag". Whatever else is written
+		// around it (a scheme, something to sign in with) is not part of
+		// the name, and what signs in is never kept.
+		ref := strings.TrimSpace(fl["image"])
+		if i := strings.Index(ref, "://"); i >= 0 && !hasMark(ref[:i]) {
+			ref = ref[i+3:]
+		}
+		if head, _, _ := strings.Cut(ref, "/"); strings.Contains(head, "@") {
+			ref = ref[strings.LastIndex(head, "@")+1:]
+		}
+		repo, _ := collect.SplitImage(ref)
 		first, rest, slash := strings.Cut(repo, "/")
 		switch {
 		case !slash:
@@ -183,8 +193,12 @@ func normalize(f *found) {
 			if !hasMark(repo) {
 				fl["registry"] = "docker.io"
 			}
-		case first == ecrRegistry:
+		case strings.HasPrefix(first, ecrRegistry):
 			fl["registry"], repo = ecrRegistryName, rest
+			// The one account the login step names, if it names one.
+			if account := strings.TrimPrefix(first, ecrRegistry); account != "" {
+				fl["account"] = account
+			}
 		case strings.ContainsAny(first, ".:") || first == "localhost" || hasMark(first):
 			fl["registry"], repo = first, rest
 			if m := ecrHost.FindStringSubmatch(first); m != nil {
@@ -193,7 +207,10 @@ func normalize(f *found) {
 		default:
 			fl["registry"] = "docker.io"
 		}
-		fl["image"] = strings.ReplaceAll(repo, ecrRegistry, "")
+		if strings.Contains(repo, ecrRegistry) {
+			repo = mark(unknownExpression) // the registry in the middle of a name: not an image name
+		}
+		fl["image"] = repo
 	case "kubernetes_workload":
 		if kind, ok := kubeKinds[strings.ToLower(strings.SplitN(fl["workload_kind"], ".", 2)[0])]; ok {
 			fl["workload_kind"] = kind
@@ -240,8 +257,8 @@ var actionRecognisers = map[string]func(actionStep) []found{
 		return one("cloudformation_stack", "stack", s.with("name"))
 	},
 	"jakejarvis/s3-sync-action": func(s actionStep) []found {
-		v, _ := s.sc.env("AWS_S3_BUCKET")
-		return one("s3_bucket", "bucket", s.sc.resolve(v))
+		v, _ := s.sc.envValue("AWS_S3_BUCKET", 0)
+		return one("s3_bucket", "bucket", v)
 	},
 	"einaregilsson/beanstalk-deploy": func(s actionStep) []found {
 		return one("elastic_beanstalk_environment", "app", s.with("environment_name"))
@@ -479,7 +496,6 @@ var commandRecognisers = []commandRecogniser{
 	kubectlApply,
 	rec("kubectl set image", kubectlWorkloads),
 	rec("kubectl rollout restart", kubectlWorkloads),
-	rec("kubectl rollout status", kubectlWorkloads),
 	helmUpgrade,
 	helmUpgrade.as("helm install"),
 	dockerPush,
@@ -544,7 +560,7 @@ var noValueFlags = map[string]map[string]bool{
 	"gcloud":     set("--quiet", "-q", "--allow-unauthenticated", "--no-allow-unauthenticated", "--no-traffic"),
 	"argocd":     set("--prune", "--force", "--grpc-web", "--insecure", "--plaintext", "--async", "--dry-run"),
 	"eb":         set("--staged", "--debug", "--verbose", "--quiet", "--nohang"),
-	"ecs":        set("--no-deregister", "--rollback", "--newrelic-revision", "--diff", "--no-diff"),
+	"ecs":        set("--no-deregister", "--rollback", "--diff", "--no-diff"),
 }
 
 func set(names ...string) map[string]bool {
@@ -587,6 +603,13 @@ var (
 	jsonComment = regexp.MustCompile(`(?m)^\s*//.*$|/\*[\s\S]*?\*/`)
 )
 
+// wranglerConfig is what is read of a wrangler configuration file: the
+// name at the top and the names its environments give themselves.
+type wranglerConfig struct {
+	top  string
+	envs map[string]string
+}
+
 // wranglerName returns the name a Worker (or Pages project) is deployed
 // under, from the wrangler configuration in dir, and the file it was read
 // from. With an environment, wrangler deploys "<name>-<env>" unless the
@@ -606,55 +629,67 @@ func (ev *evaluator) wranglerName(dir, config, env string) (name, from string) {
 		if strings.HasPrefix(rel, "..") {
 			continue
 		}
-		file := filepath.Join(ev.r.root, filepath.FromSlash(rel))
-		// Only a regular file inside the checkout: a link could point
-		// anywhere.
-		if info, err := os.Lstat(file); err != nil || !info.Mode().IsRegular() || info.Size() > maxFileSize {
-			continue
-		}
-		raw, err := os.ReadFile(file)
-		if err != nil {
-			continue
-		}
-		var top, own string
-		if strings.HasSuffix(rel, ".toml") {
-			section := ""
-			for _, line := range strings.Split(string(raw), "\n") {
-				if m := tomlSection.FindStringSubmatch(line); m != nil {
-					section = m[1]
-					continue
-				}
-				if m := tomlName.FindStringSubmatch(line); m != nil {
-					switch section {
-					case "":
-						top = m[1]
-					case "env." + env:
-						own = m[1]
-					}
-				}
-			}
-		} else {
-			var doc struct {
-				Name string `json:"name"`
-				Env  map[string]struct {
-					Name string `json:"name"`
-				} `json:"env"`
-			}
-			if json.Unmarshal(jsonComment.ReplaceAll(raw, nil), &doc) != nil {
-				continue
-			}
-			top, own = doc.Name, doc.Env[env].Name
+		// Read once: the same step is read again for every matrix
+		// combination, and the file can be large.
+		cfg, read := ev.wrangler[rel]
+		if !read {
+			cfg = ev.readWrangler(rel)
+			ev.wrangler[rel] = cfg
 		}
 		switch {
-		case env != "" && own != "":
-			return own, rel
-		case top == "":
-			continue
+		case cfg == nil:
+		case env != "" && cfg.envs[env] != "":
+			return cfg.envs[env], rel
+		case cfg.top == "":
 		case env != "":
-			return top + "-" + env, rel
+			return cfg.top + "-" + env, rel
 		default:
-			return top, rel
+			return cfg.top, rel
 		}
 	}
 	return unknown, ""
+}
+
+func (ev *evaluator) readWrangler(rel string) *wranglerConfig {
+	file := filepath.Join(ev.r.root, filepath.FromSlash(rel))
+	// Only a regular file inside the checkout: a link could point anywhere.
+	if info, err := os.Lstat(file); err != nil || !info.Mode().IsRegular() || info.Size() > maxFileSize {
+		return nil
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil || !ev.spend(len(raw)) {
+		return nil
+	}
+	cfg := &wranglerConfig{envs: map[string]string{}}
+	if strings.HasSuffix(rel, ".toml") {
+		section := ""
+		for _, line := range strings.Split(string(raw), "\n") {
+			if m := tomlSection.FindStringSubmatch(line); m != nil {
+				section = m[1]
+				continue
+			}
+			if m := tomlName.FindStringSubmatch(line); m != nil {
+				if env, ok := strings.CutPrefix(section, "env."); ok {
+					cfg.envs[env] = m[1]
+				} else if section == "" {
+					cfg.top = m[1]
+				}
+			}
+		}
+		return cfg
+	}
+	var doc struct {
+		Name string `json:"name"`
+		Env  map[string]struct {
+			Name string `json:"name"`
+		} `json:"env"`
+	}
+	if json.Unmarshal(jsonComment.ReplaceAll(raw, nil), &doc) != nil {
+		return nil
+	}
+	cfg.top = doc.Name
+	for env, e := range doc.Env {
+		cfg.envs[env] = e.Name
+	}
+	return cfg
 }
