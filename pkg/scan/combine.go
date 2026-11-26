@@ -46,7 +46,7 @@ func Clean(snap, previous *facts.Snapshot) (int, error) {
 	if snap == nil {
 		return 0, fmt.Errorf("%w: it is empty", ErrForeign)
 	}
-	r, err := redact.New()
+	r, err := redact.Shared()
 	if err != nil {
 		return 0, fmt.Errorf("load secret rules: %w", err)
 	}
@@ -303,7 +303,39 @@ func Combine(primary, extra *facts.Snapshot) (*facts.Snapshot, error) {
 	if err := rebuild(out); err != nil {
 		return nil, err
 	}
+	keepClassification(out, p.BaselineKey, x.BaselineKey)
 	return out, nil
+}
+
+// keepClassification is called on a snapshot that was put together again
+// from stored ones (Combine, Without). Putting it together finalizes it,
+// and Finalize stamps what it finalizes with the baseline key of this
+// version of the code, whatever version read the content. A stored
+// snapshot read before the kind registry changed would then pass for one
+// read after it, and the next comparison with a fresh scan would report the
+// reclassification as changes to every resource it touched, instead of
+// saying that the two cannot be compared.
+//
+// So the result keeps saying how its content was classified: the key of
+// the snapshot it was made from when that differs from this version's, and
+// for two snapshots with different keys, both. Neither equals the key of a
+// fresh scan, which is what a comparison looks at.
+func keepClassification(out *facts.Snapshot, from ...string) {
+	now := out.BaselineKey
+	var old []string
+	same := true
+	for _, key := range from {
+		if key == "" {
+			continue // never finalized by a version that recorded one
+		}
+		same = same && key == now
+		if len(old) == 0 || old[len(old)-1] != key {
+			old = append(old, key)
+		}
+	}
+	if !same {
+		out.BaselineKey = strings.Join(old, "+")
+	}
 }
 
 // clone copies a snapshot deeply, so that nothing done to the copy reaches
@@ -318,4 +350,94 @@ func clone(s *facts.Snapshot) (*facts.Snapshot, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Without returns a copy of a finalized snapshot with everything of the
+// named connectors taken out: their facts, their coverage, and every
+// relationship that had one of those facts at an end. What is left is put
+// together again from itself, as Combine does: relationships made by
+// grouping rules and components are derived anew, so that nothing in the
+// result was made from what was removed (a component anchored on a removed
+// fact is gone, one that only had such a fact as a member is built without
+// it). The argument is not changed.
+//
+// It is how a caller forgets one source of a snapshot it stored without
+// reading the others again: the result is what the same scan would have
+// been had that source not been part of it, as far as the sources are read
+// independently of each other. (A collector that used another's findings
+// while reading, as the Kubernetes collector does with the clusters of the
+// cloud scan, leaves facts that still say so.)
+//
+// removed is how many facts were taken out. A snapshot left with no fact
+// and no coverage is returned as that: the caller decides whether an empty
+// snapshot is worth keeping.
+func Without(snap *facts.Snapshot, connectors ...string) (out *facts.Snapshot, removed int, err error) {
+	if snap == nil {
+		return nil, 0, errors.New("a snapshot is needed")
+	}
+	out, err = clone(snap)
+	if err != nil {
+		return nil, 0, err
+	}
+	removed, err = Strip(out, connectors...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, removed, nil
+}
+
+// Strip is Without done to the snapshot itself, for a caller that holds the
+// only copy and has no use for the original: a large snapshot is then held
+// in memory once, not twice. On error the snapshot must not be used.
+func Strip(snap *facts.Snapshot, connectors ...string) (removed int, err error) {
+	if snap == nil {
+		return 0, errors.New("a snapshot is needed")
+	}
+	out := snap
+	drop := map[string]bool{}
+	for _, c := range connectors {
+		drop[c] = true
+	}
+	kept := map[string]bool{}
+	keep := out.Facts[:0]
+	for _, f := range out.Facts {
+		if drop[f.Source.Connector] {
+			removed++
+			continue
+		}
+		kept[f.ID] = true
+		keep = append(keep, f)
+	}
+	clear(out.Facts[len(keep):]) // what was dropped is not kept alive by the slice
+	out.Facts = keep
+	coverage := out.Coverage[:0]
+	for _, c := range out.Coverage {
+		if !drop[c.Connector] {
+			coverage = append(coverage, c)
+		}
+	}
+	out.Coverage = coverage
+	edges := out.Edges[:0]
+	for _, e := range out.Edges {
+		// Rule-made relationships are derived again below, from what is left.
+		if strings.HasPrefix(e.Derivation.Producer, "rule:") || !kept[e.From] || !kept[e.To] {
+			continue
+		}
+		edges = append(edges, e)
+	}
+	clear(out.Edges[len(edges):])
+	out.Edges = edges
+	// Notes are attached to components and facts by a components file, which
+	// a stored snapshot is rebuilt without (as in Clean and Combine).
+	original := out.BaselineKey
+	if out.RegistryKey != "" {
+		// The key named a components file that is not applied here.
+		original = ""
+	}
+	out.RegistryKey = ""
+	if err := rebuild(out); err != nil {
+		return 0, err
+	}
+	keepClassification(out, original)
+	return removed, nil
 }

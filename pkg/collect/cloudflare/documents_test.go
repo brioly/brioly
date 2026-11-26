@@ -1,9 +1,14 @@
 package cloudflare_test
 
 import (
+	"context"
+	"encoding/json"
+	"time"
+
 	"strings"
 	"testing"
 
+	"github.com/brioly/brioly/pkg/collect"
 	"github.com/brioly/brioly/pkg/components"
 	"github.com/brioly/brioly/pkg/facts"
 	"github.com/brioly/brioly/pkg/render"
@@ -342,5 +347,153 @@ func TestNothingAboutCloudflareWithoutCloudflare(t *testing.T) {
 		if strings.Contains(body, "Cloudflare") {
 			t.Errorf("%s mentions Cloudflare", name)
 		}
+	}
+}
+
+// Taking one source out of a snapshot gives what a scan of the other
+// sources alone gives: the same facts with the same hashes, the same
+// relationships (none left hanging, the rule-made ones derived again), the
+// same components, coverage and documents. For each of three sources, and
+// with the snapshot it was taken from left as it was.
+func TestWithoutIsTheScanOfTheOtherSources(t *testing.T) {
+	read := collectFrom(t, &fake{})
+	full := withOrigins(t, finalized(t, read), "0.0.0.0/0:443")
+	before, _ := json.Marshal(full)
+
+	// The same sources as separate results, as a caller that reads each
+	// source by itself has them. Rule-made relationships are not part of
+	// any: they are made by Run.
+	of := func(connectors ...string) []collect.Result {
+		want := map[string]bool{}
+		for _, c := range connectors {
+			want[c] = true
+		}
+		var r collect.Result
+		in := map[string]bool{}
+		for _, f := range full.Facts {
+			if want[f.Source.Connector] {
+				r.Facts = append(r.Facts, f)
+				in[f.ID] = true
+			}
+		}
+		for _, e := range full.Edges {
+			if in[e.From] && in[e.To] && !strings.HasPrefix(e.Derivation.Producer, "rule:") {
+				r.Edges = append(r.Edges, e)
+			}
+		}
+		for _, c := range full.Coverage {
+			if want[c.Connector] {
+				r.Coverage = append(r.Coverage, c)
+			}
+		}
+		return []collect.Result{r}
+	}
+	clock := func() time.Time { return now }
+	all := []string{"cloudflare", "aws", "kubernetes"}
+	for _, gone := range all {
+		var rest []string
+		for _, c := range all {
+			if c != gone {
+				rest = append(rest, c)
+			}
+		}
+		got, removed, err := scan.Without(full, gone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := scan.Run(context.Background(), scan.Options{Collected: of(rest...), ID: full.ID, Now: clock})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removed == 0 || len(got.Facts)+removed != len(full.Facts) {
+			t.Errorf("without %s: %d removed, %d left of %d", gone, removed, len(got.Facts), len(full.Facts))
+		}
+		for name, pair := range map[string][2]any{
+			"facts": {got.Facts, want.Facts}, "relationships": {got.Edges, want.Edges},
+			"components": {got.Components, want.Components}, "coverage": {got.Coverage, want.Coverage},
+			"baseline": {got.BaselineKey, want.BaselineKey},
+		} {
+			a, _ := json.Marshal(pair[0])
+			b, _ := json.Marshal(pair[1])
+			if string(a) != string(b) {
+				t.Errorf("without %s: the %s differ from a scan of %v alone:\n%s\n%s", gone, name, rest, a, b)
+			}
+		}
+		// The scan's own header (its name, when it ran) is the caller's to keep: the
+		// documents are compared as of the same scan.
+		want.ID, want.StartedAt, want.FinishedAt, want.CollectorVersion = got.ID, got.StartedAt, got.FinishedAt, got.CollectorVersion
+		a, b := documents(t, got), documents(t, want)
+		for name := range b {
+			if a[name] != b[name] {
+				for i, line := range strings.Split(b[name], "\n") {
+					if al := strings.Split(a[name], "\n"); i >= len(al) || al[i] != line {
+						t.Errorf("without %s: %s differs from that of a scan of %v alone, first at line %d: %q", gone, name, rest, i+1, line)
+						break
+					}
+				}
+			}
+		}
+		if len(a) != len(b) {
+			t.Errorf("without %s: %d documents, %d from a scan of %v alone", gone, len(a), len(b), rest)
+		}
+		// Nothing of the source is left, and nothing points at nothing.
+		ids := map[string]bool{}
+		for _, f := range got.Facts {
+			ids[f.ID] = true
+			if f.Source.Connector == gone {
+				t.Errorf("without %s: %s is still there", gone, f.ID)
+			}
+		}
+		for _, e := range got.Edges {
+			if !ids[e.From] || !ids[e.To] {
+				t.Errorf("without %s: a relationship hangs: %s -> %s", gone, e.From, e.To)
+			}
+		}
+		for _, c := range got.Components {
+			for _, m := range c.Members {
+				if !ids[m] {
+					t.Errorf("without %s: component %s has a member that is gone: %s", gone, c.Name, m)
+				}
+			}
+		}
+		for _, c := range got.Coverage {
+			if c.Connector == gone {
+				t.Errorf("without %s: coverage of it is left: %+v", gone, c)
+			}
+		}
+	}
+	if after, _ := json.Marshal(full); string(after) != string(before) {
+		t.Error("Without changed the snapshot it was given")
+	}
+	// Everything taken out: nothing is left, and that is not an error.
+	empty, removed, err := scan.Without(full, all...)
+	if err != nil || removed != len(full.Facts) || len(empty.Facts)+len(empty.Edges)+len(empty.Components)+len(empty.Coverage) != 0 {
+		t.Errorf("without everything: %d removed, %v, %d facts left", removed, err, len(empty.Facts))
+	}
+	// A source that is not there: the same snapshot again.
+	same, removed, err := scan.Without(full, "nothing")
+	if err != nil || removed != 0 || len(same.Facts) != len(full.Facts) || len(same.Edges) != len(full.Edges) || len(same.Components) != len(full.Components) {
+		t.Errorf("without a source that is not there: %d removed, %v", removed, err)
+	}
+}
+
+// Strip is Without done in place: the same result, in the snapshot given.
+func TestStripIsWithoutInPlace(t *testing.T) {
+	full := withOrigins(t, finalized(t, collectFrom(t, &fake{})), "0.0.0.0/0:443")
+	want, removed, err := scan.Without(full, "cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := scan.Strip(full, "cloudflare")
+	if err != nil || n != removed {
+		t.Fatalf("Strip: %d removed, %v; Without removed %d", n, err, removed)
+	}
+	a, _ := json.Marshal(full)
+	b, _ := json.Marshal(want)
+	if string(a) != string(b) {
+		t.Error("Strip left something other than what Without returns")
+	}
+	if _, err := scan.Strip(nil, "cloudflare"); err == nil {
+		t.Error("Strip of no snapshot is not an error")
 	}
 }

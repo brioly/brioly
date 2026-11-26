@@ -26,14 +26,26 @@ var sensitiveKeyParts = []string{"password", "passwd", "secret", "token", "apike
 // gitleaks has no rule for this shape, so it is masked here.
 var urlCredentials = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@`)
 
-// Redactor masks secrets using the gitleaks default rule set.
+// Redactor masks secrets using the gitleaks default rule set. It may be
+// used from several goroutines at once.
 type Redactor struct {
-	mu  sync.Mutex
 	det *detect.Detector
 }
 
-// New returns a Redactor with the gitleaks default configuration.
+// gitleaks guards every call into gitleaks, of every Redactor. Loading its
+// default configuration writes state that is global to the process (its
+// viper instance), so two Redactors made at once crashed the process with
+// "concurrent map read and map write": a service that masks an upload while
+// a scan starts does exactly that. A detector is not documented as safe
+// for concurrent use either, so detection takes the same lock. Calls are
+// short; what is serialized is the matching of one string.
+var gitleaks sync.Mutex
+
+// New returns a Redactor with the gitleaks default configuration. Most
+// callers want Shared: loading the rules takes a moment.
 func New() (*Redactor, error) {
+	gitleaks.Lock()
+	defer gitleaks.Unlock()
 	det, err := detect.NewDetectorDefaultConfig()
 	if err != nil {
 		return nil, err
@@ -86,7 +98,7 @@ func (r *Redactor) keyed(key, value string) (string, bool) {
 		inputs = append(inputs, key+"="+out)
 	}
 	var secrets []string
-	r.mu.Lock()
+	gitleaks.Lock()
 	for _, in := range inputs {
 		for _, f := range r.det.DetectString(in) {
 			secret := f.Secret
@@ -100,7 +112,7 @@ func (r *Redactor) keyed(key, value string) (string, bool) {
 			}
 		}
 	}
-	r.mu.Unlock()
+	gitleaks.Unlock()
 
 	// Replace longer secrets first so a secret that contains another one is
 	// masked as a whole.
