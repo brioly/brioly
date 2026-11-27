@@ -534,3 +534,31 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 - `echo aws ecs …`처럼 따옴표 없이 명령을 출력만 하는 줄, heredoc 본문의 줄은 명령으로 읽힐 수 있습니다.
 - workflow 파일 하나가 파싱되지 않는 동안에는 그 레포의 다른 workflow에서 지운 대상도 이전 스캔의 것으로 남습니다(coverage 단위가 레포·kind).
 
+## AWS: 저장소·전송·DNS·API·메시징·IAM Role (2026-11-27 추가)
+
+`RegistryVersion` 8. kind와 속성 등급은 `pkg/facts/kinds.go`와 v1 문서의 표에 있습니다. 여기에는 무엇을 부르고 무엇을 남기지 않는지를 적습니다.
+
+| 서비스 | 부르는 것 | 남기지 않는 것 |
+|---|---|---|
+| S3 (계정에서 한 번) | `ListBuckets`, (리전이 없을 때만) `GetBucketLocation`, `GetPublicAccessBlock`, `GetBucketPolicyStatus`, `GetBucketNotificationConfiguration`, 계정의 `GetPublicAccessBlock` | 객체는 나열도 읽기도 하지 않음. 버킷 정책 문서와 ACL은 요청하지 않음. 알림의 이벤트 종류와 key 필터, 생성 시각 |
+| CloudFront (한 번) | `ListDistributions` | custom origin header(이름과 값), 수정 시각, ETag, comment |
+| Route 53 (한 번) | `ListHostedZones`, `ListResourceRecordSets` | TXT와 A·AAAA·CNAME·MX·NS 밖의 모든 type의 값(Cloudflare 수집기와 같은 규칙) |
+| IAM (한 번) | `ListRoles`, Role마다 `ListAttachedRolePolicies`·`ListRolePolicies` | 권한 정책 문서는 요청하지 않음. trust policy는 principal만 쓰고 조건은 버림. 사용자·그룹·access key는 읽지 않음. `/aws-service-role/` Role은 사실로 만들지 않음 |
+| API Gateway (리전) | REST: `GetRestApis`, `GetResources`(embed=methods), `GetStages`, `GetVpcLinks`, `GetDomainNames`, `GetBasePathMappings`. HTTP·WebSocket: `GetApis`, `GetRoutes`, `GetIntegrations`, `GetStages`, `GetApiMappings` | resource policy, stage variable, request template, HTTP integration URI의 경로와 query(호스트만 남김). API key·export·authorizer는 요청하지 않음 |
+| SQS (리전) | `ListQueues`, `GetQueueAttributes`(이름을 지정한 속성만: ARN, FIFO, redrive policy, 암호화, visibility timeout, 보존 기간) | 큐 정책, 메시지 수, 시각은 요청하지 않음. 메시지는 받지 않음 |
+| SNS (리전) | `ListTopics`, `ListSubscriptions` | 구독 endpoint는 프로토콜이 sqs·lambda·firehose일 때만(ARN) 관계로 남김. 이메일 주소, 전화번호, URL은 남기지 않음 |
+| DynamoDB (리전) | `ListTables`, `DescribeTable` | 항목 수, 크기, stream label. 항목은 읽지 않음 |
+| ElastiCache (리전) | `DescribeReplicationGroups`, `DescribeCacheClusters`, `DescribeServerlessCaches` | replication group의 멤버 cluster는 사실로 만들지 않음(버전과 보안 그룹을 읽는 데만 씀) |
+| Lambda (리전) | `ListEventSourceMappings` | mapping은 사실이 아니고 관계만 만듦. coverage는 `aws.lambda.event_source_mapping`으로 따로 남김(권한이 없어도 함수의 coverage는 complete) |
+
+**관계**
+- ARN으로 읽은 것(수집기, observed): 버킷 → 알림 대상(topic, queue, function), topic → 구독한 queue·function, queue → DLQ, queue·table(stream) → 그것이 trigger하는 function, API → Lambda function·로드 밸런서(REST는 VPC link의 대상, HTTP는 listener), function·task definition → IAM Role(`uses`). 대상이 스캔하지 않은 리전이나 계정에 있으면 관계만 남고 어디에도 이어지지 않습니다.
+- 호스트 이름으로 이은 것(`pkg/components/hosts.go`, observed, `rule:host-match`): CloudFront origin → 버킷·로드 밸런서·API, Route 53 레코드 → 로드 밸런서·배포·API(기본 endpoint와 custom domain의 대상)·버킷(S3 website alias는 레코드와 이름이 같은 버킷), API의 HTTP integration 호스트 → 로드 밸런서. 환경변수 값에 ElastiCache endpoint가 있으면 기존 규칙대로 `depends_on`이 생깁니다.
+
+**컴포넌트**: cache와 table은 데이터 저장소입니다. 버킷·queue·topic은 계정마다 많고 대부분 문서가 다루는 흐름 밖에 있어서, 다른 사실과 관계(routes_to, depends_on, exposes)가 있을 때만 컴포넌트가 됩니다. 나머지도 문서의 표에는 나옵니다. IAM Role은 컴포넌트가 아니고 그 Role로 실행되는 워크로드의 멤버입니다.
+
+**공개 버킷의 판단**: `policy_public`(AWS의 `GetBucketPolicyStatus`)이 true이고 버킷과 계정 어느 쪽의 public access block에도 `RestrictPublicBuckets`가 켜져 있지 않을 때입니다. ACL로 열린 버킷은 판단하지 않고 문서의 "Not covered"에 적습니다.
+
+**권한이 없는 Role**: 새 호출이 거부되면 그 kind의 coverage가 `denied`가 되고 다른 kind는 그대로입니다. 스캔은 실패하지 않습니다.
+
+**한계**: EC2 인스턴스 프로필과 EKS의 IRSA는 Role과 잇지 않습니다. API Gateway의 authorizer가 무엇을 검사하는지, CloudFront 뒤의 origin이 배포만 받는지는 읽지 않습니다. Route 53 zone은 다이어그램에 그리지 않습니다(DNS는 요청이 지나는 길이 아님). ElastiCache의 지원 종료일은 Redis OSS만 표에 있고(`amazon-elasticache-redis`) Valkey와 Memcached는 "모름"으로 나옵니다.
