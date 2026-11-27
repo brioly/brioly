@@ -123,7 +123,7 @@ func resolveCitations(md string, s *facts.Snapshot, published bool, w wording) (
 				unknown++
 				return w.unverified
 			}
-			l = FootnoteLabel(id)
+			l = footnoteLabel(id)
 			labels[id] = l
 			order = append(order, l)
 			footnotes = append(footnotes, text)
@@ -152,11 +152,8 @@ func resolveCitations(md string, s *facts.Snapshot, published bool, w wording) (
 	return b.String(), unknown
 }
 
-// FootnoteLabel is the label of the footnote a citation of the ID becomes
-// in a written document: "[[id]]" is written as "[^label]". Short, and the
-// same for the same ID in every document, so a caller can find where a
-// stored document cites a fact or a component.
-func FootnoteLabel(id string) string {
+// footnoteLabel is a short, stable label for a cited ID.
+func footnoteLabel(id string) string {
 	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:])[:6]
 }
