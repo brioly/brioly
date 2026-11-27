@@ -62,7 +62,7 @@ func TestCitationsResolveFactsComponentsAndNotes(t *testing.T) {
 		t.Errorf("unknown = %d\n%s", unknown, text)
 	}
 	// Labels come from the cited ID, so adding a citation moves no other.
-	svc, cmp, note := FootnoteLabel("aws:svc-1"), FootnoteLabel("cmp_api"), FootnoteLabel("note_1")
+	svc, cmp, note := footnoteLabel("aws:svc-1"), footnoteLabel("cmp_api"), footnoteLabel("note_1")
 	for _, want := range []string{"ECS [^" + svc + "]. Part of [^" + cmp + "], see [^" + note + "] and [^" + svc + "].", "[^" + svc + "]: aws.ecs.service **api** — `svc-1`",
 		"[^" + cmp + "]: Component **API** (backend_api), identified by `svc-1`", "[^" + note + `]: Team note by bee: "Moved to Fargate in 2025."`} {
 		if !strings.Contains(text, want) {
@@ -104,7 +104,7 @@ func TestWrittenFollowsTheLanguage(t *testing.T) {
 			}
 		}
 		// The source list is the same in every language.
-		if l := "[^" + FootnoteLabel("aws:svc-1") + "]: aws.ecs.service **api** — `svc-1`"; !strings.Contains(got, l) {
+		if l := "[^" + footnoteLabel("aws:svc-1") + "]: aws.ecs.service **api** — `svc-1`"; !strings.Contains(got, l) {
 			t.Errorf("%s: missing source %q", language, l)
 		}
 	}

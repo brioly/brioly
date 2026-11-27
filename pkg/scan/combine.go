@@ -506,88 +506,121 @@ func strip(snap *facts.Snapshot, dropFact func(*facts.Fact) bool, dropCoverage f
 	return removed, nil
 }
 
-// placement are the kinds whose "contains" says where a resource sits,
-// not what it is made of: what runs in a network is not part of it.
-var placement = map[string]bool{"aws.ec2.vpc": true, "aws.ec2.subnet": true}
+// holders are the kinds of resource that hold others: what a "contains"
+// relationship from one of them leads to is part of it, and is left out
+// with it (Holds). The list is closed. A "contains" from any other kind
+// says something else (a VPC or a subnet is where a resource sits), and a
+// collector that starts to write the relationship for a new kind does not
+// thereby change what leaving a resource out takes with it.
+//
+//   - a load balancer holds its listeners, a listener its rules;
+//   - an RDS cluster holds its instances;
+//   - an ECS cluster holds its services;
+//   - an EKS cluster holds its node groups, a node group its Auto Scaling
+//     groups (not the workloads that run on the cluster);
+//   - a Route 53 hosted zone holds its records;
+//   - a Cloudflare zone holds its records and load balancers;
+//   - a repository holds what was found in it, a workflow its deploy
+//     targets.
+var holders = map[string]bool{
+	"aws.elbv2.load_balancer": true, "aws.elbv2.listener": true,
+	"aws.rds.cluster": true, "aws.ecs.cluster": true,
+	"aws.eks.cluster": true, "aws.eks.nodegroup": true,
+	"aws.route53.hosted_zone": true, "cloudflare.zone": true,
+	repositoryKind: true, "code.ci_workflow": true,
+}
 
-// Holds returns the given identifiers with those of every fact of the
-// snapshot that the named facts hold, sorted, each once: for a caller that
-// leaves a resource out together with what belongs to it (StripFacts).
-// What a fact holds is what the snapshot's "contains" relationships say,
-// read on from each fact found (a repository and what was found in it, a
-// DNS zone and its records, a load balancer, its listeners and their
-// rules), and for a repository every fact whose identifier begins with the
-// repository's. Networks are not holders in this sense: a VPC or a subnet
-// is where a resource sits.
+const repositoryKind = "code.repository"
+
+// Holder says whether a resource of the kind holds others (Holds).
+func Holder(kind string) bool { return holders[kind] }
+
+// Holds says what each of the named facts holds in the snapshot: for a
+// caller that leaves a resource out together with what belongs to it
+// (StripFacts). listed gives, for each identifier, the kind the caller
+// knows the fact to have, which is used when the snapshot does not have
+// the fact ("" when not known). The result has an entry for each named
+// fact that holds anything here: the identifiers of the facts it holds,
+// sorted, each once, itself not among them. Every identifier in the
+// result is of a fact the snapshot has.
 //
-// An identifier the snapshot has no fact for is kept in the result. When
-// it is a repository's (facts.RepoID), the facts whose identifiers begin
-// with it are added all the same: what was found in a repository is left
-// out also when the snapshot does not have the repository itself.
+// What a fact holds:
 //
-// The rule is applied to each snapshot by itself, so it also covers what
-// a holder gains later: a new dependency of a repository that is left out
-// has a new identifier, and is held by it all the same.
-func Holds(snap *facts.Snapshot, ids ...string) []string {
-	if snap == nil || len(ids) == 0 {
-		return ids
+//   - what "contains" relationships lead to from it, and on from what is
+//     found, as long as the fact they start at is of a kind that holds
+//     (holders). A relationship that was inferred, or made by a grouping
+//     rule, is not followed;
+//   - for a repository, also every fact whose identifier begins with the
+//     repository's and ":" (facts.FileID and the like), and what those
+//     hold in turn. This is so also when the snapshot does not have the
+//     repository itself and listed says it is one.
+//
+// A fact that is not in the snapshot and is not a repository holds
+// nothing here: what it held when it was last seen is the caller's to
+// remember.
+func Holds(snap *facts.Snapshot, listed map[string]string) map[string][]string {
+	out := map[string][]string{}
+	if snap == nil || len(listed) == 0 {
+		return out
 	}
 	kind := make(map[string]string, len(snap.Facts))
 	for i := range snap.Facts {
 		kind[snap.Facts[i].ID] = snap.Facts[i].Kind
 	}
-	set := map[string]bool{}
-	queue := append([]string{}, ids...)
-	var holds map[string][]string
-	for len(queue) > 0 {
-		// By relationship, as far as it goes.
-		var prefixes []string
+	var held map[string][]string // by relationship, made when first needed
+	follow := func(id string) []string {
+		if !holders[kind[id]] {
+			return nil
+		}
+		if held == nil {
+			held = map[string][]string{}
+			for _, e := range snap.Edges {
+				if e.Type != facts.EdgeContains || !holders[kind[e.From]] || e.Derivation.Type == facts.Inferred || strings.HasPrefix(e.Derivation.Producer, "rule:") {
+					continue
+				}
+				if _, in := kind[e.To]; in {
+					held[e.From] = append(held[e.From], e.To)
+				}
+			}
+		}
+		return held[id]
+	}
+	for id, known := range listed {
+		if id == "" {
+			continue
+		}
+		k, in := kind[id]
+		if !in {
+			k = known
+		}
+		set := map[string]bool{}
+		queue := follow(id)
+		if k == repositoryKind {
+			prefix := id + ":"
+			for i := range snap.Facts {
+				if strings.HasPrefix(snap.Facts[i].ID, prefix) {
+					queue = append(queue, snap.Facts[i].ID)
+				}
+			}
+		}
 		for len(queue) > 0 {
-			id := queue[0]
+			next := queue[0]
 			queue = queue[1:]
-			if id == "" || set[id] {
+			if next == id || set[next] {
 				continue
 			}
-			set[id] = true
-			k, in := kind[id]
-			if k == "code.repository" || (!in && (strings.HasPrefix(id, "gh:") || strings.HasPrefix(id, "repo:"))) {
-				prefixes = append(prefixes, id+":")
-			}
-			if !in {
-				continue
-			}
-			if holds == nil {
-				holds = map[string][]string{}
-				for _, e := range snap.Edges {
-					if e.Type == facts.EdgeContains && !placement[kind[e.From]] {
-						holds[e.From] = append(holds[e.From], e.To)
-					}
-				}
-			}
-			queue = append(queue, holds[id]...)
+			set[next] = true
+			queue = append(queue, follow(next)...)
 		}
-		// Then by a repository's identifier; what is found that way may
-		// hold more.
-		if len(prefixes) == 0 {
-			break
+		if len(set) == 0 {
+			continue
 		}
-		for i := range snap.Facts {
-			id := snap.Facts[i].ID
-			if set[id] {
-				continue
-			}
-			for _, p := range prefixes {
-				if strings.HasPrefix(id, p) {
-					queue = append(queue, id)
-					break
-				}
-			}
+		list := make([]string, 0, len(set))
+		for h := range set {
+			list = append(list, h)
 		}
+		sort.Strings(list)
+		out[id] = list
 	}
-	out := make([]string, 0, len(set))
-	for id := range set {
-		out = append(out, id)
-	}
-	sort.Strings(out)
 	return out
 }
