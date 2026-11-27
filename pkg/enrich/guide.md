@@ -16,27 +16,27 @@ This guide is the standing set of decisions about how brioly's written documents
 
 ## 2. Connections brioly inferred
 
-Every connection in your input (an entry of `edges`, of `related_components` or of RELATIONS) was either read from the source or made by one of brioly's rules from names. One that rests on inference alone carries `"inferred": true` and, in `basis`, the rule that made it. A connection without that mark was read: the source states it.
+Every connection in your input (an entry of `edges`, of `related_components` or of RELATIONS) is either stated by what brioly read or inferred. A connection is stated when the source says it outright, or when both sides say enough to identify each other (the same address, the file a workflow names, a name together with its account and region). It is inferred when a rule made it from less than that, usually from a name alone. One that rests on inference alone carries `"inferred": true` and, in `basis`, the rule that made it, when brioly knows the rule. A connection without that mark is stated.
 
 1. Write an inferred connection as inferred, in the sentence that states it, and say in a few words what it rests on, for example "appears to be deployed by the `deploy` workflow (matched by service name) [[id]] [[id]]". Never state it as a plain fact, in any field: summaries included.
-2. Do not hedge a connection that is not marked. "Likely" or "appears to" on something that was read is as wrong as certainty about something inferred.
-3. Mark it once, where the connection is stated, and keep the mark on the connection. The things on both sides were read; only the link between them is inferred. Do not carry the doubt into the other sentences about them.
+2. Do not hedge a connection that is not marked. "Likely" or "appears to" on something that is stated is as wrong as certainty about something inferred.
+3. Mark it once, where the connection is stated, and keep the mark on the connection. The things on both sides were read; only the link between them is inferred. Do not carry the doubt into sentences about what each side is by itself. But what you know about one side only through the inferred link is said of the side it was read from, not of the other: when a repository or a manifest is tied to a workload by inference, its language, framework, Dockerfile and workflows are the repository's ("the repository uses Go"), not the workload's ("the service is written in Go").
 4. An inferred connection is a finding, not a gap: do not list it among the unknowns or the questions for the team only because it is inferred.
 5. A component summary that calls a connection inferred was written under this rule. When you build on that summary, keep it inferred.
 6. When you revise, a sentence that states an inferred connection as certain, or hedges one that is not marked, breaks this guide: fix that sentence and nothing else.
 
 Name the basis in plain words, not by the rule's name. What each one means:
 
-- `rule:name-match`: a repository has the same name as the workload or as the image it runs. Nothing else ties the code to the workload.
+- `rule:name-match`: exactly one repository has the name of the workload, of the image it runs, or of the repository the workload itself names as its source. The link rests on that name; brioly did not check that the code is what runs.
 - `rule:deploy-path`: a workflow of that repository deploys the workload or pushes the image it runs, so the repository is taken to be its code.
 - `rule:deploy-target`: a workflow names what it deploys (a service, function, workload or project), and one resource that was read has that name. The workflow does not state everything that would identify it (the account, the region or the cluster).
 - `rule:image-push`: a workflow pushes an image with the name of the image that runs, without stating which registry.
 - `rule:k8s-manifest-match`: a manifest in a repository declares a workload of the same kind, namespace and name as one running in a cluster. The manifest may not be what was applied.
-- `rule:k8s-service-tag`: the tags on a load balancer name a Kubernetes Service and cluster, and one manifest declares a Service of that name. The cluster itself was not read.
-- `rule:ingress-host`: a DNS record has the host name an Ingress serves. Where the record points is not known.
+- `rule:k8s-service-tag`: the tags on a load balancer name a Kubernetes Service and cluster, and one manifest declares a Service of that name. Nothing read from the cluster's API confirms it.
+- `rule:ingress-host`: a DNS record has the host name an Ingress serves. The record's target matches nothing brioly read.
 - `rule:service-name`: a tunnel routes to the in-cluster name of a Service, and one cluster that was read has a Service of that name. The name does not say which cluster the tunnel runs in.
 
-For a basis that is not in this list, say only that brioly inferred the connection.
+For an inferred connection with no basis, or with one that is not in this list, say only that brioly inferred the connection.
 
 ## 3. What each document is for
 

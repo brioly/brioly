@@ -41,6 +41,20 @@ const ProducerK8sServiceTag = "rule:k8s-service-tag"
 // runs in a cluster.
 const ProducerK8sManifestMatch = "rule:k8s-manifest-match"
 
+// Rule reports whether producer is the name of one of this package's
+// rules. A snapshot that came from elsewhere can name any producer on an
+// edge; code that passes a producer on (to a model, see package enrich)
+// passes only these.
+func Rule(producer string) bool {
+	switch producer {
+	case ProducerNameMatch, ProducerK8sServiceTag, ProducerK8sManifestMatch,
+		ProducerHostMatch, ProducerIngressHost, ProducerServiceName,
+		ProducerDeployTarget, ProducerDeployManifest, ProducerImagePush, ProducerDeployPath:
+		return true
+	}
+	return false
+}
+
 // liveConnector is the connector of facts read from a cluster's API server
 // (kube.Connector); k8s.* facts of other connectors come from manifests.
 const liveConnector = "kubernetes"
@@ -491,9 +505,11 @@ func Relations(s *facts.Snapshot) []Relation {
 
 // InferredRelations returns the relations that rest on inference alone:
 // every edge between the two components' members that makes the relation
-// is inferred. The value is what made those edges (the producers, such as
-// "rule:service-name"), sorted. A relation that one observed edge supports
-// is not in the map.
+// is inferred. The value is the rules that made those edges (such as
+// "rule:service-name"), sorted. Only the names of this package's rules are
+// in it (see Rule): an edge may say anything about what produced it, and
+// the value is passed on to a model. A relation that one observed edge
+// supports is not in the map.
 func InferredRelations(s *facts.Snapshot) map[Relation][]string {
 	_, inferred := relations(s)
 	return inferred
@@ -532,7 +548,7 @@ func relations(s *facts.Snapshot) ([]Relation, map[Relation][]string) {
 		if producers[r] == nil {
 			producers[r] = map[string]bool{}
 		}
-		if e.Derivation.Producer != "" {
+		if Rule(e.Derivation.Producer) {
 			producers[r][e.Derivation.Producer] = true
 		}
 	}

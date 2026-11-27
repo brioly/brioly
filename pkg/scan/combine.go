@@ -146,9 +146,9 @@ func Clean(snap, previous *facts.Snapshot) (int, error) {
 
 func derivation(d *facts.Derivation, text func(*string)) {
 	d.Type = plain(d.Type)
-	if !strings.HasPrefix(d.Producer, "rule:") {
-		d.Producer = plain(d.Producer)
-	}
+	// Masked like any other text, whatever it starts with: a rule's name
+	// is left as it is by the masking, and nothing else is trusted.
+	text(&d.Producer)
 	for i := range d.Evidence {
 		text(&d.Evidence[i])
 	}

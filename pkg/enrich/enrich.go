@@ -175,14 +175,14 @@ type promptFact struct {
 	Name       string            `json:"name,omitempty"`
 	Attributes map[string]any    `json:"attributes,omitempty"`
 	Labels     map[string]string `json:"labels,omitempty"`
-	Inferred   bool              `json:"inferred,omitempty"`
 }
 
 // inference says whether a connection was inferred and by what. Both
 // fields are absent for a connection that was read from the source, so
 // the model is told about inference only where there is some. Basis holds
-// the names of the rules that made the connection (the edges' producers),
-// which the writing guide explains; the edges' evidence is not sent.
+// the names of the rules that made the connection, which the writing guide
+// explains: an edge's producer when it is one of package components'
+// rules, never any other text. The edges' evidence is not sent.
 type inference struct {
 	Inferred bool     `json:"inferred,omitempty"`
 	Basis    []string `json:"basis,omitempty"`
@@ -211,7 +211,9 @@ func edgeInference(e facts.Edge) inference {
 		return inference{}
 	}
 	in := inference{Inferred: true}
-	if e.Derivation.Producer != "" {
+	// Only the name of a known rule: a producer is free text in a snapshot
+	// that came from elsewhere, and must not reach the model.
+	if components.Rule(e.Derivation.Producer) {
 		in.Basis = []string{e.Derivation.Producer}
 	}
 	return in
@@ -562,7 +564,7 @@ func assemble(s *facts.Snapshot, ov overviewResponse, sections []componentRespon
 }
 
 func toPromptFact(f facts.Fact) promptFact {
-	return promptFact{ID: f.ID, Kind: f.Kind, Name: f.Name, Attributes: f.Attributes, Labels: f.Labels, Inferred: f.Derivation.Type == facts.Inferred}
+	return promptFact{ID: f.ID, Kind: f.Kind, Name: f.Name, Attributes: f.Attributes, Labels: f.Labels}
 }
 
 func componentPrompt(s *facts.Snapshot, c facts.Component, byID map[string]facts.Fact, notes []facts.Annotation, relations []components.Relation, inferred map[components.Relation][]string) string {
