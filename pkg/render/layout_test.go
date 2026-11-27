@@ -582,6 +582,16 @@ func TestPanelHasNoVolatileValues(t *testing.T) {
 		if p.Component == nil || p.Component.Name != "API" || p.Kind != "aws.ecs.service" || p.Source.Value != "aws:svc" {
 			t.Errorf("panel = %s", raw)
 		}
+		// The box names nothing; the fact it stands for is asked for.
+		if id, ok := d.FactID("system", b.ID); !ok || id != "aws:svc" || strings.Contains(b.ID, "svc") {
+			t.Errorf("the fact of box %s: %q %v", b.ID, id, ok)
+		}
+		if _, ok := d.FactID("no-such-view", b.ID); ok {
+			t.Error("a fact for a box of a view that does not exist")
+		}
+		if _, ok := d.FactID("system", "no-such-box"); ok {
+			t.Error("a fact for a box that does not exist")
+		}
 		rel := ""
 		for _, r := range p.Relations {
 			rel += fmt.Sprintf("%s %s %s inferred=%v\n", r.Direction, r.Type, r.Name, r.Inferred)
