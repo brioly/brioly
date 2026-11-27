@@ -3,6 +3,9 @@ package enrich
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -360,5 +363,145 @@ func TestOneKindOfDocumentCanBeLeftOut(t *testing.T) {
 			(out.Onboarding != "") != c.onboarding || (len(out.JobDescriptions) > 0) != c.hasJDs {
 			t.Errorf("%s: calls %v, guide %d bytes, %d job descriptions", c.name, m.calls, len(out.Onboarding), len(out.JobDescriptions))
 		}
+	}
+}
+
+// inferredSnapshot is a service with the workflow target that deploys it,
+// a tunnel in front of it and a database behind it. The deploy link and
+// the tunnel's route rest on names (inferred); the rest was read.
+func inferredSnapshot(producer string) *facts.Snapshot {
+	now := time.Unix(0, 0)
+	mk := func(id, kind, name string) facts.Fact {
+		return facts.NewObserved(id, kind, name, facts.Source{Connector: "aws", Scope: "1"}, facts.SourceRef{Type: facts.RefARN, Value: id}, now)
+	}
+	rule := func(typ, from, to, producer string) facts.Edge {
+		// Evidence is what an edge made by a rule carries; it is not sent.
+		return facts.NewEdge(typ, from, to, facts.Derivation{Type: facts.Inferred, Evidence: []string{"evidence:" + from, to}, Producer: producer}, nil)
+	}
+	read := func(typ, from, to string) facts.Edge {
+		return facts.NewEdge(typ, from, to, facts.Derivation{Type: facts.Observed}, nil)
+	}
+	return &facts.Snapshot{
+		Facts: []facts.Fact{
+			mk("aws:svc", "aws.ecs.service", "api"), mk("aws:td", "aws.ecs.task_definition", "api"),
+			mk("code:target", "code.deploy_target", "api"), mk("cf:tunnel", "cloudflare.tunnel", "edge"), mk("aws:db", "aws.rds.cluster", "main-db"),
+		},
+		Edges: []facts.Edge{
+			read(facts.EdgeUses, "aws:svc", "aws:td"),
+			rule(facts.EdgeDeploys, "code:target", "aws:svc", producer),
+			rule(facts.EdgeRoutesTo, "cf:tunnel", "aws:svc", components.ProducerServiceName),
+			read(facts.EdgeDependsOn, "aws:svc", "aws:db"),
+		},
+		Components: []facts.Component{
+			{ID: "cmp_api", Anchor: "aws:svc", Name: "api", Role: components.RoleWorkload, Members: []string{"aws:svc", "aws:td", "code:target"}},
+			{ID: "cmp_db", Anchor: "aws:db", Name: "main-db", Role: components.RoleDataStore, Members: []string{"aws:db"}},
+			{ID: "cmp_edge", Anchor: "cf:tunnel", Name: "edge", Role: components.RoleNetworkEdge, Members: []string{"cf:tunnel"}},
+		},
+	}
+}
+
+// The model is told which connections are inferred and by which rule, and
+// nothing about the ones that were read: an unmarked connection is a fact.
+func TestInferredConnectionsAreMarkedForTheModel(t *testing.T) {
+	prompts := func(s *facts.Snapshot) (api, overview string) {
+		t.Helper()
+		m := &fakeModel{}
+		if _, err := Run(context.Background(), m, s, Options{Language: "English", NoJobDescriptions: true}); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range m.prompts {
+			switch {
+			case strings.HasPrefix(p, "COMPONENT:") && strings.Contains(p, `"ID":"cmp_api"`):
+				api = p
+			case strings.HasPrefix(p, "COMPONENTS:"):
+				overview = p
+			}
+		}
+		return api, overview
+	}
+	api, overview := prompts(inferredSnapshot(components.ProducerDeployTarget))
+	for _, want := range []string{
+		// Between members: the deploy link is inferred, the task definition was read.
+		`"edges":[{"from":"aws:svc","type":"uses","to":"aws:td"},{"from":"code:target","type":"deploys","to":"aws:svc","inferred":true,"basis":["rule:deploy-target"]}]`,
+		// To other components.
+		`{"id":"cmp_db","name":"main-db","role":"data_store","relation":"this component depends_on it"}`,
+		`{"id":"cmp_edge","name":"edge","role":"network_edge","relation":"it routes_to this component","inferred":true,"basis":["rule:service-name"]}`,
+	} {
+		if !strings.Contains(api, want) {
+			t.Errorf("the component prompt lacks %s\n%s", want, api)
+		}
+	}
+	wantRelations := `RELATIONS (by component id):
+[{"from":"cmp_api","type":"depends_on","to":"cmp_db"},{"from":"cmp_edge","type":"routes_to","to":"cmp_api","inferred":true,"basis":["rule:service-name"]}]`
+	if !strings.Contains(overview, wantRelations) {
+		t.Errorf("the overview prompt lacks %s\n%s", wantRelations, overview)
+	}
+	for _, p := range []string{api, overview} {
+		if strings.Contains(p, "evidence") || strings.Contains(p, "derivation") || strings.Contains(p, "producer") {
+			t.Errorf("more than the mark and its basis was sent:\n%s", p)
+		}
+	}
+
+	// The same snapshot gives the same input.
+	if again, againOverview := prompts(inferredSnapshot(components.ProducerDeployTarget)); again != api || againOverview != overview {
+		t.Error("the same snapshot gave a different prompt")
+	}
+
+	// A link that stops being inferred is a change to what is written.
+	s := inferredSnapshot(components.ProducerDeployTarget)
+	s.Edges[1].Derivation.Type = facts.Observed
+	if read, _ := prompts(s); read == api || strings.Contains(read, `"rule:deploy-target"`) {
+		t.Errorf("a deploy link that was read is still marked:\n%s", read)
+	}
+
+	// An inferred fact is marked too; an observed one carries no mark.
+	s = inferredSnapshot(components.ProducerDeployTarget)
+	s.Facts[1].Derivation.Type = facts.Inferred
+	marked, _ := prompts(s)
+	if !strings.Contains(marked, `{"id":"aws:td","kind":"aws.ecs.task_definition","name":"api","inferred":true}`) || strings.Contains(marked, `"name":"api","inferred":true},{"id":"aws:td"`) {
+		t.Errorf("fact marks are wrong:\n%s", marked)
+	}
+}
+
+// The guide tells the model what each rule's name means. A rule that can
+// make an inferred link and is not explained there would reach the model
+// as a bare name.
+func TestGuideExplainsEveryInferringRule(t *testing.T) {
+	for _, p := range []string{
+		components.ProducerNameMatch, components.ProducerDeployPath, components.ProducerDeployTarget, components.ProducerImagePush,
+		components.ProducerK8sManifestMatch, components.ProducerK8sServiceTag, components.ProducerIngressHost, components.ProducerServiceName,
+	} {
+		if !strings.Contains(guide, "- `"+p+"`: ") {
+			t.Errorf("guide.md does not explain %s", p)
+		}
+	}
+	// The rules are found in the source, so that a new one fails here
+	// until it is explained or listed as never inferring.
+	neverInferred := map[string]bool{components.ProducerHostMatch: true, components.ProducerDeployManifest: true}
+	files, err := filepath.Glob("../components/*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no source files of package components: %v", err)
+	}
+	found := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range regexp.MustCompile(`"(rule:[a-z0-9-]+)"`).FindAllStringSubmatch(string(src), -1) {
+			found++
+			if !neverInferred[p[1]] && !strings.Contains(guide, "- `"+p[1]+"`: ") {
+				t.Errorf("guide.md does not explain %s (%s)", p[1], file)
+			}
+		}
+	}
+	if found < 10 {
+		t.Errorf("found %d rule names in package components, want all of them", found)
+	}
+	if strings.Contains(componentPrompt(&facts.Snapshot{}, facts.Component{}, nil, nil, nil, nil), "inferred") {
+		t.Error("a rule about writing inferred connections is in the task prompt; it belongs in guide.md")
 	}
 }

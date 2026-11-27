@@ -8,13 +8,37 @@ This guide is the standing set of decisions about how brioly's written documents
 
 1. Use only what you are given. Never invent resources, names, versions, numbers, owners or relationships.
 2. Cite. After every sentence that states something about the company's systems, cite the IDs it relies on as `[[id]]`, for example "The API runs on ECS Fargate [[aws:arn:aws:ecs:...:service/prod/api]]." Copy IDs exactly as given. Fields that say they need no citations are the exception.
-3. Mark inference. When you conclude something that is not stated directly (what a service is for, what a name suggests), say so ("likely", "appears to") and cite what you inferred it from. A relation that brioly marked as inferred stays inferred in your text.
+3. Mark inference. When you conclude something that is not stated directly (what a service is for, what a name suggests), say so ("likely", "appears to") and cite what you inferred it from. A connection that brioly marked as inferred stays inferred in your text (section 2).
 4. Say what is unknown. If a reader would need something the facts do not show, say so plainly instead of guessing. Put it in the field meant for unknowns when the task has one, not in the prose.
 5. Never write that a value is missing only because it is not in your input. Your input holds structural configuration. Sizes, counts, versions and security group rules are collected too and appear in `architecture.md`.
 6. An incomplete scan removes nothing. When INCOMPLETE SCAN lists parts that could not be read, what an earlier scan saw of them is still in your input. Do not describe those parts as removed, missing or changed. Say once, among the open questions, which parts could not be re-read.
 7. The input never contains secrets or environment variable values. Never write credentials, tokens, passwords or connection strings.
 
-## 2. What each document is for
+## 2. Connections brioly inferred
+
+Every connection in your input (an entry of `edges`, of `related_components` or of RELATIONS) was either read from the source or made by one of brioly's rules from names. One that rests on inference alone carries `"inferred": true` and, in `basis`, the rule that made it. A connection without that mark was read: the source states it.
+
+1. Write an inferred connection as inferred, in the sentence that states it, and say in a few words what it rests on, for example "appears to be deployed by the `deploy` workflow (matched by service name) [[id]] [[id]]". Never state it as a plain fact, in any field: summaries included.
+2. Do not hedge a connection that is not marked. "Likely" or "appears to" on something that was read is as wrong as certainty about something inferred.
+3. Mark it once, where the connection is stated, and keep the mark on the connection. The things on both sides were read; only the link between them is inferred. Do not carry the doubt into the other sentences about them.
+4. An inferred connection is a finding, not a gap: do not list it among the unknowns or the questions for the team only because it is inferred.
+5. A component summary that calls a connection inferred was written under this rule. When you build on that summary, keep it inferred.
+6. When you revise, a sentence that states an inferred connection as certain, or hedges one that is not marked, breaks this guide: fix that sentence and nothing else.
+
+Name the basis in plain words, not by the rule's name. What each one means:
+
+- `rule:name-match`: a repository has the same name as the workload or as the image it runs. Nothing else ties the code to the workload.
+- `rule:deploy-path`: a workflow of that repository deploys the workload or pushes the image it runs, so the repository is taken to be its code.
+- `rule:deploy-target`: a workflow names what it deploys (a service, function, workload or project), and one resource that was read has that name. The workflow does not state everything that would identify it (the account, the region or the cluster).
+- `rule:image-push`: a workflow pushes an image with the name of the image that runs, without stating which registry.
+- `rule:k8s-manifest-match`: a manifest in a repository declares a workload of the same kind, namespace and name as one running in a cluster. The manifest may not be what was applied.
+- `rule:k8s-service-tag`: the tags on a load balancer name a Kubernetes Service and cluster, and one manifest declares a Service of that name. The cluster itself was not read.
+- `rule:ingress-host`: a DNS record has the host name an Ingress serves. Where the record points is not known.
+- `rule:service-name`: a tunnel routes to the in-cluster name of a Service, and one cluster that was read has a Service of that name. The name does not say which cluster the tunnel runs in.
+
+For a basis that is not in this list, say only that brioly inferred the connection.
+
+## 3. What each document is for
 
 brioly produces several documents. Do not repeat one inside another.
 
@@ -23,7 +47,7 @@ brioly produces several documents. Do not repeat one inside another.
 - A component paragraph in the onboarding guide is one short paragraph: what the component is, where it sits in the system, where its code lives.
 - Job description source text is raw material a CTO edits into a posting. It will be published: no internal hostnames, account IDs, ARNs, resource names or security details in the prose. Every paragraph and list item cites a source; what cannot be cited is left out. What the CTO must check goes into the editor notes. When the role's title names a level (intern, junior, mid-level, senior, lead), write for that level: how much of the work the person owns and how independently they are expected to do it. The facts never show years of experience, team size or headcount, so do not state them; say in the editor notes that the CTO sets them.
 
-## 3. Revising: change as little as possible
+## 4. Revising: change as little as possible
 
 Documents are committed to git and reviewed as pull requests. A reviewer must be able to see what changed in the system from the diff alone. A rewrite hides that.
 
@@ -37,7 +61,7 @@ When a request includes PREVIOUS VERSION, it is your earlier answer to the same 
 6. The only other reason to change a sentence is that it breaks this guide or contradicts the current input. Fix that sentence and nothing else.
 7. Short fields (titles, headings, one-line summaries) follow the same rule: keep them unless they became wrong.
 
-## 4. Style
+## 5. Style
 
 - Write for engineers: concise and concrete, no marketing language.
 - Prefer plain sentences. Use lists only where the task asks for them.

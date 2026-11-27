@@ -485,6 +485,21 @@ type Relation struct {
 // Relations returns the depends_on, routes_to and runs_on relationships between
 // components, sorted.
 func Relations(s *facts.Snapshot) []Relation {
+	out, _ := relations(s)
+	return out
+}
+
+// InferredRelations returns the relations that rest on inference alone:
+// every edge between the two components' members that makes the relation
+// is inferred. The value is what made those edges (the producers, such as
+// "rule:service-name"), sorted. A relation that one observed edge supports
+// is not in the map.
+func InferredRelations(s *facts.Snapshot) map[Relation][]string {
+	_, inferred := relations(s)
+	return inferred
+}
+
+func relations(s *facts.Snapshot) ([]Relation, map[Relation][]string) {
 	owner := map[string]string{}
 	for _, c := range s.Components {
 		for _, m := range c.Members {
@@ -494,6 +509,8 @@ func Relations(s *facts.Snapshot) []Relation {
 		}
 	}
 	seen := map[Relation]bool{}
+	observed := map[Relation]bool{}
+	producers := map[Relation]map[string]bool{}
 	var out []Relation
 	for _, e := range s.Edges {
 		if e.Type != facts.EdgeDependsOn && e.Type != facts.EdgeRoutesTo && e.Type != facts.EdgeRunsOn {
@@ -508,6 +525,16 @@ func Relations(s *facts.Snapshot) []Relation {
 			seen[r] = true
 			out = append(out, r)
 		}
+		if e.Derivation.Type != facts.Inferred {
+			observed[r] = true
+			continue
+		}
+		if producers[r] == nil {
+			producers[r] = map[string]bool{}
+		}
+		if e.Derivation.Producer != "" {
+			producers[r][e.Derivation.Producer] = true
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -519,7 +546,19 @@ func Relations(s *facts.Snapshot) []Relation {
 		}
 		return a.To < b.To
 	})
-	return out
+	inferred := map[Relation][]string{}
+	for r, ps := range producers {
+		if observed[r] {
+			continue
+		}
+		list := make([]string, 0, len(ps))
+		for p := range ps {
+			list = append(list, p)
+		}
+		sort.Strings(list)
+		inferred[r] = list
+	}
+	return out, inferred
 }
 
 // expandRepositories adds what says how a member repository's code is built

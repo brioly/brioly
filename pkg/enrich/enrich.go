@@ -32,7 +32,7 @@ import (
 
 // PromptVersion identifies the prompts and schemas below. Bump it whenever
 // they change so cached responses are not reused.
-const PromptVersion = "enrich-v2"
+const PromptVersion = "enrich-v3"
 
 // concurrency bounds parallel model calls.
 const concurrency = 4
@@ -175,6 +175,26 @@ type promptFact struct {
 	Name       string            `json:"name,omitempty"`
 	Attributes map[string]any    `json:"attributes,omitempty"`
 	Labels     map[string]string `json:"labels,omitempty"`
+	Inferred   bool              `json:"inferred,omitempty"`
+}
+
+// inference says whether a connection was inferred and by what. Both
+// fields are absent for a connection that was read from the source, so
+// the model is told about inference only where there is some. Basis holds
+// the names of the rules that made the connection (the edges' producers),
+// which the writing guide explains; the edges' evidence is not sent.
+type inference struct {
+	Inferred bool     `json:"inferred,omitempty"`
+	Basis    []string `json:"basis,omitempty"`
+}
+
+// promptEdge is a connection between two facts of one component or, in
+// the overview, between two components (by component ID).
+type promptEdge struct {
+	From string `json:"from"`
+	Type string `json:"type"`
+	To   string `json:"to"`
+	inference
 }
 
 type relatedComponent struct {
@@ -182,6 +202,29 @@ type relatedComponent struct {
 	Name     string `json:"name"`
 	Role     string `json:"role"`
 	Relation string `json:"relation"` // e.g. "this depends_on it", "it routes_to this"
+	inference
+}
+
+// edgeInference is how an edge was derived, for the model.
+func edgeInference(e facts.Edge) inference {
+	if e.Derivation.Type != facts.Inferred {
+		return inference{}
+	}
+	in := inference{Inferred: true}
+	if e.Derivation.Producer != "" {
+		in.Basis = []string{e.Derivation.Producer}
+	}
+	return in
+}
+
+// relationInference is the same for a relation between components: it is
+// inferred only when no observed edge supports it.
+func relationInference(inferred map[components.Relation][]string, r components.Relation) inference {
+	basis, ok := inferred[r]
+	if !ok {
+		return inference{}
+	}
+	return inference{Inferred: true, Basis: basis}
 }
 
 type promptNote struct {
@@ -204,12 +247,13 @@ func Run(ctx context.Context, m Model, s *facts.Snapshot, opts Options) (*Output
 		notes[a.Target] = append(notes[a.Target], a)
 	}
 	relations := components.Relations(s)
+	inferred := components.InferredRelations(s)
 
 	// 1. One call per component.
 	sections := make([]componentResponse, len(s.Components))
 	err := parallel(ctx, len(s.Components), func(ctx context.Context, i int) error {
 		c := s.Components[i]
-		raw, err := w.ask(ctx, "component:"+c.ID, Request{System: system, Prompt: componentPrompt(s, c, byID, notes[c.ID], relations), Schema: componentSchema()})
+		raw, err := w.ask(ctx, "component:"+c.ID, Request{System: system, Prompt: componentPrompt(s, c, byID, notes[c.ID], relations, inferred), Schema: componentSchema()})
 		if err != nil {
 			return fmt.Errorf("describe component %q: %w", c.Name, err)
 		}
@@ -237,7 +281,7 @@ func Run(ctx context.Context, m Model, s *facts.Snapshot, opts Options) (*Output
 	stack := stackJSON(s)
 	var ov overviewResponse
 	if !opts.NoOnboarding || (!opts.NoJobDescriptions && len(opts.JDRoles) == 0) {
-		raw, err := w.ask(ctx, "overview", Request{System: system, Prompt: overviewPrompt(s, relations, stack, unknowns, len(opts.JDRoles) == 0), Schema: overviewSchema()})
+		raw, err := w.ask(ctx, "overview", Request{System: system, Prompt: overviewPrompt(s, relations, inferred, stack, unknowns, len(opts.JDRoles) == 0), Schema: overviewSchema()})
 		if err != nil {
 			return nil, fmt.Errorf("write overview: %w", err)
 		}
@@ -518,17 +562,17 @@ func assemble(s *facts.Snapshot, ov overviewResponse, sections []componentRespon
 }
 
 func toPromptFact(f facts.Fact) promptFact {
-	return promptFact{ID: f.ID, Kind: f.Kind, Name: f.Name, Attributes: f.Attributes, Labels: f.Labels}
+	return promptFact{ID: f.ID, Kind: f.Kind, Name: f.Name, Attributes: f.Attributes, Labels: f.Labels, Inferred: f.Derivation.Type == facts.Inferred}
 }
 
-func componentPrompt(s *facts.Snapshot, c facts.Component, byID map[string]facts.Fact, notes []facts.Annotation, relations []components.Relation) string {
+func componentPrompt(s *facts.Snapshot, c facts.Component, byID map[string]facts.Fact, notes []facts.Annotation, relations []components.Relation, inferred map[components.Relation][]string) string {
 	member := map[string]bool{}
 	in := struct {
 		Component struct {
 			ID, Name, Role, Owner string
 		} `json:"component"`
 		Facts   []promptFact       `json:"facts"`
-		Edges   [][3]string        `json:"edges"`
+		Edges   []promptEdge       `json:"edges"`
 		Related []relatedComponent `json:"related_components,omitempty"`
 		Notes   []promptNote       `json:"team_notes,omitempty"`
 	}{}
@@ -543,11 +587,12 @@ func componentPrompt(s *facts.Snapshot, c facts.Component, byID map[string]facts
 	// changing, and the component would be rewritten for nothing.
 	for _, e := range s.Edges {
 		if member[e.From] && member[e.To] {
-			in.Edges = append(in.Edges, [3]string{e.From, e.Type, e.To})
+			in.Edges = append(in.Edges, promptEdge{From: e.From, Type: e.Type, To: e.To, inference: edgeInference(e)})
 		}
 	}
-	sort.Slice(in.Edges, func(i, j int) bool {
-		return strings.Join(in.Edges[i][:], "\x00") < strings.Join(in.Edges[j][:], "\x00")
+	sort.SliceStable(in.Edges, func(i, j int) bool {
+		a, b := in.Edges[i], in.Edges[j]
+		return a.From+"\x00"+a.Type+"\x00"+a.To < b.From+"\x00"+b.Type+"\x00"+b.To
 	})
 	names := map[string]facts.Component{}
 	for _, o := range s.Components {
@@ -557,10 +602,10 @@ func componentPrompt(s *facts.Snapshot, c facts.Component, byID map[string]facts
 		switch c.ID {
 		case r.From:
 			o := names[r.To]
-			in.Related = append(in.Related, relatedComponent{ID: o.ID, Name: o.Name, Role: ruleRole(o), Relation: "this component " + r.Type + " it"})
+			in.Related = append(in.Related, relatedComponent{ID: o.ID, Name: o.Name, Role: ruleRole(o), Relation: "this component " + r.Type + " it", inference: relationInference(inferred, r)})
 		case r.To:
 			o := names[r.From]
-			in.Related = append(in.Related, relatedComponent{ID: o.ID, Name: o.Name, Role: ruleRole(o), Relation: "it " + r.Type + " this component"})
+			in.Related = append(in.Related, relatedComponent{ID: o.ID, Name: o.Name, Role: ruleRole(o), Relation: "it " + r.Type + " this component", inference: relationInference(inferred, r)})
 		}
 	}
 	for _, n := range notes {
@@ -573,7 +618,7 @@ Task: describe this one component of the company's system.
 - "summary": one or two plain sentences saying what it is and does, without citations.
 - "section_markdown": one short paragraph (at most four sentences, no heading, no lists) for an onboarding guide that gives a new engineer the big picture: what this component is, where it sits in the system (what reaches it, what it runs on or depends on), and where its code lives if the facts show it. Leave configuration detail out of the prose: no resource IDs, subnet or security group lists, CIDRs or instance sizes. Exact configuration is in a separate reference document (architecture.md). Cite fact IDs, related component IDs and team note IDs as [[id]].
 - "unknowns": up to four short statements of what a new engineer would need to know about this component and the facts cannot show (its purpose, owner, what triggers it, how it is deployed). No citations. Do not put these in section_markdown.
-The input holds structural configuration only. Sizes, counts, versions and security group rules are collected too and shown in architecture.md: never write that such values are missing, unknown or not collected. A related component with relation "runs_on" or "routes_to" was linked by brioly, sometimes by inference from tags: state the link, and call it inferred.
+The input holds structural configuration only. Sizes, counts, versions and security group rules are collected too and shown in architecture.md: never write that such values are missing, unknown or not collected.
 - "workload_role": if the component's role is "workload", choose the closest of frontend, backend_api, worker, scheduled_job, or "unknown" if the facts do not show it. For any other role return "unknown".
 "team_notes" were written by people at the company: treat them as trusted context about intent and history, and cite them. If a note contradicts the facts about the current state, follow the facts and say that they differ.`
 }
@@ -647,10 +692,10 @@ func componentsJSON(s *facts.Snapshot, unknowns map[string][]string) string {
 	return string(raw)
 }
 
-func overviewPrompt(s *facts.Snapshot, relations []components.Relation, stack string, unknowns map[string][]string, suggestRoles bool) string {
-	rels := make([][3]string, 0, len(relations))
+func overviewPrompt(s *facts.Snapshot, relations []components.Relation, inferred map[components.Relation][]string, stack string, unknowns map[string][]string, suggestRoles bool) string {
+	rels := make([]promptEdge, 0, len(relations))
 	for _, r := range relations {
-		rels = append(rels, [3]string{r.From, r.Type, r.To})
+		rels = append(rels, promptEdge{From: r.From, Type: r.Type, To: r.To, inference: relationInference(inferred, r)})
 	}
 	relJSON, _ := json.Marshal(rels)
 	var incomplete []string
@@ -661,7 +706,7 @@ func overviewPrompt(s *facts.Snapshot, relations []components.Relation, stack st
 	}
 	incJSON, _ := json.Marshal(incomplete)
 	var b strings.Builder
-	b.WriteString("COMPONENTS:\n" + componentsJSON(s, unknowns) + "\n\nRELATIONS ([from, type, to] by component id):\n" + string(relJSON) +
+	b.WriteString("COMPONENTS:\n" + componentsJSON(s, unknowns) + "\n\nRELATIONS (by component id):\n" + string(relJSON) +
 		"\n\nNETWORK (VPCs and the components placed in them):\n" + networkJSON(s) +
 		"\n\nSTACK:\n" + stack + "\n\nINCOMPLETE SCAN:\n" + string(incJSON) + `
 
