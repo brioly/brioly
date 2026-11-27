@@ -114,6 +114,7 @@ func TestCleanMasksEveryTierAndBoundsText(t *testing.T) {
 	}
 	f.Ref.Value = "https://cluster.example/" + fakeToken
 	f.Derivation.Evidence = []string{"seen in " + fakeToken}
+	f.Derivation.Producer = "rule:made-up " + fakeToken // the prefix of a rule's name earns no trust
 	s := &facts.Snapshot{ID: "upload " + fakeToken, Facts: []facts.Fact{f},
 		Coverage:    []facts.Coverage{{Connector: "kubernetes", Scope: "prod " + fakeToken, Kind: "k8s.workload", Status: facts.CoverageComplete}},
 		Annotations: []facts.Annotation{{Target: "k8s:prod/shop", Body: "a note that is not sent on"}},

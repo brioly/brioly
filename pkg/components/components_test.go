@@ -127,6 +127,10 @@ func TestBuildGroupsByRules(t *testing.T) {
 			t.Errorf("unexpected relation %+v", r)
 		}
 	}
+	// Every one of them was read: none rests on inference.
+	if inferred := InferredRelations(s); len(inferred) != 0 {
+		t.Errorf("inferred relations = %+v, want none", inferred)
+	}
 }
 
 func TestIDSurvivesMembershipChanges(t *testing.T) {
@@ -421,6 +425,24 @@ func TestEKSPlatformAndKubernetesLoadBalancer(t *testing.T) {
 	if len(rels) != 3 || !to[got[kDep].ID] || !to[got[cluster].ID] || !runsOn {
 		t.Errorf("relations = %+v, want load balancer -> workload, -> cluster and workload runs_on cluster", rels)
 	}
+
+	// The two relations the tags alone support are inferred, and say by
+	// which rule; the one a target group states is not.
+	inferred := InferredRelations(s)
+	for _, r := range []Relation{{From: got[nlb].ID, Type: facts.EdgeRoutesTo, To: got[kDep].ID}, {From: got[kDep].ID, Type: facts.EdgeRunsOn, To: got[cluster].ID}} {
+		if basis := inferred[r]; len(basis) != 1 || basis[0] != ProducerK8sServiceTag {
+			t.Errorf("relation %+v: basis = %v, want it inferred by the Service tag rule", r, inferred[r])
+		}
+	}
+	if _, ok := inferred[Relation{From: got[nlb].ID, Type: facts.EdgeRoutesTo, To: got[cluster].ID}]; ok || len(inferred) != 2 {
+		t.Errorf("inferred relations = %+v, want only the two made from the tags", inferred)
+	}
+	// One observed edge behind a relation makes it observed.
+	s.Edges = append(s.Edges, facts.NewEdge(facts.EdgeRoutesTo, nlb, kDep, facts.Derivation{Type: facts.Observed}, nil))
+	if _, ok := InferredRelations(s)[Relation{From: got[nlb].ID, Type: facts.EdgeRoutesTo, To: got[kDep].ID}]; ok {
+		t.Error("a relation with an observed edge behind it is still called inferred")
+	}
+	s.Edges = s.Edges[:len(s.Edges)-1]
 
 	// Two manifests declaring the same Service: do not guess.
 	s.Facts = append(s.Facts, mk(otherSvc, "k8s.service", "web", map[string]any{"namespace": "default"}),
