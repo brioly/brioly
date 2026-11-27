@@ -87,6 +87,30 @@ func cloudflareTarget(f facts.Fact) string {
 		return "load balancer " + name
 	case "aws.rds.cluster", "aws.rds.instance":
 		return "database " + name
+	case "aws.s3.bucket":
+		return "S3 bucket " + name
+	case "aws.cloudfront.distribution":
+		return "CloudFront distribution " + name
+	case "aws.apigateway.api":
+		return "API " + name
+	case "aws.lambda.function":
+		return "Lambda function " + name
+	case "aws.ecs.service":
+		return "ECS service " + name
+	case "aws.ecs.task_definition":
+		return "ECS task definition " + name
+	case "aws.sqs.queue":
+		return "queue " + name
+	case "aws.sns.topic":
+		return "topic " + name
+	case "aws.dynamodb.table":
+		return "table " + name
+	case "aws.elasticache.cache":
+		return "cache " + name
+	case "aws.elbv2.listener":
+		return "load balancer listener " + name
+	case "aws.route53.record":
+		return "DNS record " + name
 	case "cloudflare.tunnel":
 		return "Tunnel " + name
 	case "cloudflare.pages_project":

@@ -177,6 +177,7 @@ func Architecture(g *graph, diagram string) string {
 	}
 
 	writeCloudflare(&b, g)
+	writeAWSEdge(&b, g)
 
 	// Ingresses no load balancer fact serves are entry points of their own.
 	var ingresses []facts.Fact
@@ -217,6 +218,8 @@ func Architecture(g *graph, diagram string) string {
 
 	writeCompute(&b, g)
 	writeData(&b, g)
+	writeMessaging(&b, g)
+	writeRoles(&b, g)
 	writeDependencies(&b, g)
 	writeDelivery(&b, g)
 	writeExposure(&b, g)
@@ -520,10 +523,16 @@ func containerList(td facts.Fact) []string {
 
 func writeData(b *strings.Builder, g *graph) {
 	clusters, instances := g.kind("aws.rds.cluster"), g.kind("aws.rds.instance")
+	more := len(g.kind("aws.elasticache.cache"))+len(g.kind("aws.dynamodb.table"))+len(g.kind("aws.s3.bucket")) > 0
+	if len(clusters)+len(instances) == 0 && !more {
+		return
+	}
+	b.WriteString("## Data stores\n\n")
+	defer writeMoreData(b, g)
 	if len(clusters)+len(instances) == 0 {
 		return
 	}
-	b.WriteString("## Data stores\n\n| Database | Engine | Multi-AZ | Encrypted | Public | Source |\n|---|---|---|---|---|---|\n")
+	b.WriteString("| Database | Engine | Multi-AZ | Encrypted | Public | Source |\n|---|---|---|---|---|---|\n")
 	for _, d := range clusters {
 		fmt.Fprintf(b, "| %s (cluster) | %s %s | %v | %v | %v | %s |\n", mdEscape(displayName(d)), strAttr(d, "engine"), strAttr(d, "engine_version"),
 			boolAttr(d, "multi_az"), boolAttr(d, "storage_encrypted"), boolAttr(d, "publicly_accessible"), evidence(d))

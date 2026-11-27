@@ -12,6 +12,8 @@ import (
 var significantKinds = map[string]bool{
 	"aws.ecs.service": true, "aws.lambda.function": true, "aws.autoscaling.group": true, "aws.ec2.instance": true,
 	"aws.rds.cluster": true, "aws.rds.instance": true, "aws.elbv2.load_balancer": true, "aws.ec2.vpc": true, "k8s.workload": true, "k8s.ingress": true, "k8s.cluster": true,
+	"aws.cloudfront.distribution": true, "aws.apigateway.api": true, "aws.route53.hosted_zone": true,
+	"aws.dynamodb.table": true, "aws.elasticache.cache": true,
 	"cloudflare.zone": true, "cloudflare.worker": true, "cloudflare.pages_project": true, "cloudflare.tunnel": true, "cloudflare.load_balancer": true,
 }
 
@@ -42,6 +44,10 @@ func addedSeverity(f facts.Fact) (severity, rule string) {
 		return High, "ingress-open-to-internet"
 	case strings.HasPrefix(f.Kind, "aws.rds.") && f.Attributes["publicly_accessible"] == true:
 		return High, "database-made-public"
+	case f.Kind == "aws.s3.bucket" && bucketPublic(f.Attributes):
+		return High, "bucket-made-public"
+	case f.Kind == "aws.iam.role" && f.Attributes["trusts_anyone"] == true:
+		return High, "role-trusts-anyone"
 	}
 	return removedSeverity(f)
 }
@@ -58,8 +64,28 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 			severity, rule = s, r
 		}
 	}
+	// A bucket is judged whole: its policy and the public access blocks
+	// decide together, and a change to any of them can open it.
+	if f.Kind == "aws.s3.bucket" && bucketPublic(f.Attributes) {
+		before := map[string]any{}
+		for k, v := range f.Attributes {
+			before[k] = v
+		}
+		touched := false
+		for _, c := range changes {
+			switch c.Attribute {
+			case "policy_public", "public_access_block", "account_public_access_block":
+				before[c.Attribute], touched = c.Before, true
+			}
+		}
+		if touched && !bucketPublic(before) {
+			raise(High, "bucket-made-public")
+		}
+	}
 	for _, c := range changes {
 		switch {
+		case f.Kind == "aws.iam.role" && c.Attribute == "trusts_anyone" && c.After == true && c.Before != true:
+			raise(High, "role-trusts-anyone")
 		case c.Attribute == "publicly_accessible" && c.Before == false && c.After == true:
 			raise(High, "database-made-public")
 		case c.Attribute == "storage_encrypted" && c.Before == true && c.After != true:
@@ -95,6 +121,23 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 		}
 	}
 	return severity, rule
+}
+
+// bucketPublic reports whether a bucket's attributes say it is public: AWS
+// reports its policy as public and RestrictPublicBuckets is on neither for
+// the bucket nor for its account (the rule of the exposure review).
+func bucketPublic(attrs map[string]any) bool {
+	if attrs["policy_public"] != true {
+		return false
+	}
+	for _, key := range []string{"public_access_block", "account_public_access_block"} {
+		for _, v := range stringList(attrs[key]) {
+			if v == "RestrictPublicBuckets" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // gains reports whether a list attribute has a value it did not have.

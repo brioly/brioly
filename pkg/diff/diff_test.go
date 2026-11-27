@@ -360,3 +360,42 @@ func TestCloudflareRules(t *testing.T) {
 		}
 	}
 }
+
+// A bucket is public by its policy and the two public access blocks
+// together; whichever of them changes, the event is high when the bucket
+// became public and not otherwise.
+func TestBucketAndRoleSeverity(t *testing.T) {
+	bucket := func(policy bool, block, account []string) facts.Fact {
+		return facts.Fact{Kind: "aws.s3.bucket", Attributes: map[string]any{"policy_public": policy, "public_access_block": block, "account_public_access_block": account}}
+	}
+	restrict := []string{"RestrictPublicBuckets"}
+	for _, tc := range []struct {
+		name    string
+		after   facts.Fact
+		changes []Change
+		want    string
+	}{
+		{"policy made public", bucket(true, nil, nil), []Change{{Attribute: "policy_public", Before: false, After: true}}, High},
+		{"block removed from a public policy", bucket(true, []string{}, nil), []Change{{Attribute: "public_access_block", Before: restrict, After: []string{}}}, High},
+		{"policy made public under the account's block", bucket(true, nil, restrict), []Change{{Attribute: "policy_public", Before: false, After: true}}, Low},
+		{"another setting of a bucket that was already public", bucket(true, []string{"BlockPublicAcls"}, nil), []Change{{Attribute: "public_access_block", Before: []string{}, After: []string{"BlockPublicAcls"}}}, Low},
+		{"region of a public bucket", bucket(true, nil, nil), []Change{{Attribute: "region", Before: "a", After: "b"}}, Low},
+	} {
+		if got, _ := structuralSeverity(tc.after, tc.changes); got != tc.want {
+			t.Errorf("%s: severity = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+	if got, rule := addedSeverity(bucket(true, nil, nil)); got != High || rule != "bucket-made-public" {
+		t.Errorf("a new public bucket = %s (%s)", got, rule)
+	}
+	if got, _ := addedSeverity(bucket(false, nil, nil)); got != Low {
+		t.Errorf("a new private bucket = %s", got)
+	}
+	role := facts.Fact{Kind: "aws.iam.role", Attributes: map[string]any{"trusts_anyone": true}}
+	if got, rule := structuralSeverity(role, []Change{{Attribute: "trusts_anyone", Before: false, After: true}}); got != High || rule != "role-trusts-anyone" {
+		t.Errorf("a role opened to anyone = %s (%s)", got, rule)
+	}
+	if got, _ := addedSeverity(role); got != High {
+		t.Errorf("a new role anyone can assume = %s", got)
+	}
+}

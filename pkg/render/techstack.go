@@ -102,7 +102,10 @@ var serviceNames = map[string]string{
 	"aws.autoscaling.group": "EC2 Auto Scaling", "aws.elbv2.load_balancer": "Elastic Load Balancing",
 	"aws.ecs.service": "ECS", "aws.eks.cluster": "EKS", "aws.lambda.function": "Lambda", "aws.rds.cluster": "RDS / Aurora",
 	"aws.rds.instance": "RDS",
-	"cloudflare.zone":  "Cloudflare DNS and proxy", "cloudflare.worker": "Cloudflare Workers", "cloudflare.pages_project": "Cloudflare Pages",
+	"aws.s3.bucket":    "S3", "aws.cloudfront.distribution": "CloudFront", "aws.route53.hosted_zone": "Route 53",
+	"aws.apigateway.api": "API Gateway", "aws.sqs.queue": "SQS", "aws.sns.topic": "SNS", "aws.dynamodb.table": "DynamoDB",
+	"aws.elasticache.cache": "ElastiCache",
+	"cloudflare.zone":       "Cloudflare DNS and proxy", "cloudflare.worker": "Cloudflare Workers", "cloudflare.pages_project": "Cloudflare Pages",
 	"cloudflare.tunnel": "Cloudflare Tunnel", "cloudflare.load_balancer": "Cloudflare Load Balancing",
 }
 
@@ -135,6 +138,16 @@ func cloudSummary(g *graph) string {
 	}
 	if len(runtimes) > 0 {
 		fmt.Fprintf(&b, "- Lambda runtimes: %s\n", strings.Join(sortedSet(runtimes), ", "))
+	}
+	caches := map[string]bool{}
+	for _, f := range g.kind("aws.elasticache.cache") {
+		caches[strings.TrimSpace(strAttr(f, "engine")+" "+strAttr(f, "engine_version"))] = true
+	}
+	if len(caches) > 0 {
+		if len(engines)+len(runtimes) == 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "- Cache engines: %s\n", strings.Join(sortedSet(caches), ", "))
 	}
 	return b.String()
 }

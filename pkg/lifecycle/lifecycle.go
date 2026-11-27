@@ -221,6 +221,18 @@ func Find(s *facts.Snapshot, at time.Time, table *Table) []Item {
 			case engine != "":
 				add(f, what, "", strings.TrimSpace(engine+" "+major))
 			}
+		case "aws.elasticache.cache":
+			// Dates are known for ElastiCache's Redis OSS versions, by
+			// major version; Valkey and Memcached are listed as not known.
+			engine, major := attr("engine"), attr("engine_major")
+			if major == "" {
+				continue // the version could not be read
+			}
+			product := ""
+			if engine == "redis" {
+				product = "amazon-elasticache-redis"
+			}
+			add(f, "Cache", product, engine+" "+major, major)
 		case "code.dockerfile":
 			image := attr("final_base_image")
 			if image == "" || image == "scratch" {
