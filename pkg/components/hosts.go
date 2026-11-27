@@ -1,6 +1,7 @@
 package components
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -29,7 +30,7 @@ const (
 	ProducerServiceName = "rule:service-name"
 )
 
-// HostRecord reports whether a Cloudflare DNS record names a host that
+// HostRecord reports whether a DNS record (Cloudflare or Route 53) names a host that
 // serves something: an A, AAAA or CNAME record whose name is a host name.
 // A name with a label that starts with "_" is not one: such records are
 // looked up by other systems (certificate and domain validation, DKIM).
@@ -40,6 +41,15 @@ func HostRecord(f facts.Fact) bool {
 	}
 	return false
 }
+
+// s3Host matches the host names S3 serves a bucket under: the REST
+// endpoints (bucket.s3.amazonaws.com, bucket.s3.region.amazonaws.com, the
+// dual-stack ones) and the website endpoints (bucket.s3-website-region...).
+var s3Host = regexp.MustCompile(`^(.+)\.s3[.-](?:[a-z0-9-]+\.)*amazonaws\.com(?:\.cn)?$`)
+
+// s3Website matches the address a Route 53 alias to a bucket's website
+// points at; the bucket is the one named like the record.
+var s3Website = regexp.MustCompile(`^s3-website[.-][a-z0-9.-]*amazonaws\.com(?:\.cn)?$`)
 
 // attr returns a value of a fact whichever tier it is in.
 func attr(f facts.Fact, key string) any {
@@ -79,6 +89,8 @@ func hostOnly(v string) string {
 // behind it. It only adds edges; s must be finalized again afterwards.
 func linkHosts(s *facts.Snapshot) {
 	var records, tunnels, pools []facts.Fact
+	var distributions, apis []facts.Fact
+	buckets := map[string][]string{} // bucket name -> bucket facts
 	// endpoints: an address something is reached at -> the facts there.
 	// names: a host name something serves under -> the facts serving it.
 	endpoints, names := map[string][]string{}, map[string][]string{}
@@ -88,8 +100,34 @@ func linkHosts(s *facts.Snapshot) {
 	var later []facts.Fact              // facts that only claim an address nothing else has
 	for _, f := range s.Facts {
 		switch f.Kind {
-		case "cloudflare.dns_record":
+		case "cloudflare.dns_record", "aws.route53.record":
 			records = append(records, f)
+		case "aws.s3.bucket":
+			buckets[f.Name] = append(buckets[f.Name], f.ID)
+		case "aws.cloudfront.distribution":
+			distributions = append(distributions, f)
+			if h := hostOnly(attrString(f, "domain_name")); h != "" {
+				endpoints[h] = append(endpoints[h], f.ID)
+			}
+			for _, d := range stringList(attr(f, "aliases")) {
+				names[d] = append(names[d], f.ID)
+			}
+		case "aws.apigateway.api":
+			apis = append(apis, f)
+			for _, h := range append([]string{attrString(f, "endpoint")}, stringList(attr(f, "domain_targets"))...) {
+				if h = hostOnly(h); h != "" {
+					endpoints[h] = append(endpoints[h], f.ID)
+				}
+			}
+			for _, d := range stringList(attr(f, "domains")) {
+				names[d] = append(names[d], f.ID)
+			}
+		case "aws.elasticache.cache":
+			for _, key := range []string{"endpoint", "reader_endpoint"} {
+				if h := hostOnly(attrString(f, key)); h != "" {
+					endpoints[h] = append(endpoints[h], f.ID)
+				}
+			}
 		case "cloudflare.tunnel":
 			tunnels = append(tunnels, f)
 			if id := attrString(f, "tunnel_id"); id != "" {
@@ -173,7 +211,13 @@ func linkHosts(s *facts.Snapshot) {
 		if ids := endpoints[h]; len(ids) > 0 {
 			return ids
 		}
-		return endpoints[strings.TrimPrefix(h, "dualstack.")]
+		if ids := endpoints[strings.TrimPrefix(h, "dualstack.")]; len(ids) > 0 {
+			return ids
+		}
+		if m := s3Host.FindStringSubmatch(h); m != nil {
+			return buckets[m[1]]
+		}
+		return nil
 	}
 
 	for _, r := range records {
@@ -183,6 +227,11 @@ func linkHosts(s *facts.Snapshot) {
 		found := false
 		for _, t := range stringList(attr(r, "targets")) {
 			found = observed(facts.EdgeExposes, r.ID, at(t)) || found
+			// An alias to S3's website address serves the bucket that is
+			// named like the record.
+			if s3Website.MatchString(hostOnly(t)) {
+				found = observed(facts.EdgeExposes, r.ID, buckets[strings.ToLower(r.Name)]) || found
+			}
 		}
 		found = observed(facts.EdgeExposes, r.ID, names[strings.ToLower(r.Name)]) || found
 		// A Worker route only runs on requests that go through the proxy.
@@ -216,6 +265,18 @@ func linkHosts(s *facts.Snapshot) {
 					links = append(links, link{facts.EdgeRoutesTo, t.ID, ids[0], ProducerServiceName})
 				}
 			}
+		}
+	}
+	// A distribution's origins and the HTTP endpoints an API forwards to
+	// are host names: a bucket, a load balancer, an API.
+	for _, d := range distributions {
+		for _, o := range stringList(attr(d, "origins")) {
+			observed(facts.EdgeRoutesTo, d.ID, at(o))
+		}
+	}
+	for _, a := range apis {
+		for _, h := range stringList(attr(a, "integration_hosts")) {
+			observed(facts.EdgeRoutesTo, a.ID, at(h))
 		}
 	}
 	for _, p := range pools {
