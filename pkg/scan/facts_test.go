@@ -2,6 +2,7 @@ package scan
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -214,5 +215,55 @@ func TestRegroupingIsNotAChangeBetweenScans(t *testing.T) {
 	// And from then on whole against whole.
 	if res := diff.Compare(back, scanned("after")); len(res.Events) != 0 {
 		t.Errorf("the scan after the return: %+v", res.Events)
+	}
+}
+
+// A resource that holds others is named with them: by the snapshot's
+// "contains" relationships, read on, and for a repository by identifier.
+// A network holds nothing in this sense. The rule is applied to the
+// snapshot it is given, so what a holder gained since is covered.
+func TestHolds(t *testing.T) {
+	f := func(id, kind string) facts.Fact {
+		return facts.Fact{ID: id, Kind: kind, Name: id, Source: facts.Source{Connector: "x"}, Ref: facts.SourceRef{Type: "url", Value: "https://example.com/" + id}}
+	}
+	s := snap(t, "s", []facts.Fact{
+		f("v", "aws.ec2.vpc"), f("s", "aws.ec2.subnet"), f("i", "aws.ec2.instance"),
+		f("lb", "aws.elbv2.load_balancer"), f("l", "aws.elbv2.listener"), f("r", "aws.elbv2.rule"),
+		f("gh:acme/shop", "code.repository"), f("gh:acme/shop:dep:go.mod:go:pgx", "code.dependency"), f("gh:acme/shop:wf:deploy", "code.ci_workflow"),
+		f("target:1", "code.deploy_target"), f("gh:acme/shop-admin", "code.repository"), f("gh:acme/gone:file:Dockerfile", "code.dockerfile"),
+	}, []facts.Edge{
+		{Type: "contains", From: "v", To: "s"}, {Type: "contains", From: "s", To: "i"},
+		{Type: "contains", From: "lb", To: "l"}, {Type: "contains", From: "l", To: "r"}, {Type: "routes_to", From: "lb", To: "i"},
+		{Type: "contains", From: "gh:acme/shop:wf:deploy", To: "target:1"},
+	})
+	for _, c := range []struct {
+		ids  []string
+		want string
+	}{
+		{[]string{"v"}, "[v]"},
+		{[]string{"lb"}, "[l lb r]"},
+		{[]string{"i", "never"}, "[i never]"},
+		// The repository's own, what those hold in turn, and not the
+		// repository whose name only begins the same.
+		{[]string{"gh:acme/shop"}, "[gh:acme/shop gh:acme/shop:dep:go.mod:go:pgx gh:acme/shop:wf:deploy target:1]"},
+		// A repository the snapshot does not have, with something of it.
+		{[]string{"gh:acme/gone"}, "[gh:acme/gone gh:acme/gone:file:Dockerfile]"},
+	} {
+		if got := fmt.Sprint(Holds(s, c.ids...)); got != c.want {
+			t.Errorf("Holds(%v) = %s, want %s", c.ids, got, c.want)
+		}
+	}
+	if got := Holds(s); len(got) != 0 {
+		t.Errorf("nothing named: %v", got)
+	}
+	// Stripped with what it holds, the snapshot has nothing of the
+	// repository, also not what it gained since the list was made.
+	if _, err := StripFacts(s, Holds(s, "gh:acme/shop")...); err != nil {
+		t.Fatal(err)
+	}
+	for _, fact := range s.Facts {
+		if strings.HasPrefix(fact.ID, "gh:acme/shop:") || fact.ID == "target:1" {
+			t.Errorf("left: %s", fact.ID)
+		}
 	}
 }
