@@ -65,7 +65,11 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 	for _, c := range changes {
 		switch {
 		case f.Kind == "aws.iam.role" && c.Attribute == "trusts_anyone" && c.After == true && c.Before != true:
-			raise(High, "role-trusts-anyone")
+			// Not when the trust policy could not be read before: then it
+			// did not change, it became known.
+			if !wasUnread(changes, "trust_policy") {
+				raise(High, "role-trusts-anyone")
+			}
 		case c.Attribute == "publicly_accessible" && c.Before == false && c.After == true:
 			raise(High, "database-made-public")
 		case c.Attribute == "storage_encrypted" && c.Before == true && c.After != true:
@@ -128,6 +132,39 @@ func restricts(settings any) bool {
 	return false
 }
 
+// wasUnread reports whether the changes of a fact say that a part of it
+// was not read before (its "unread" attribute named the part).
+func wasUnread(changes []Change, part string) bool {
+	for _, c := range changes {
+		if c.Attribute == "unread" {
+			for _, v := range stringList(c.Before) {
+				if v == part {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// judged reports whether a snapshot knew enough about a bucket to say
+// whether it was public: its policy status and its own block were read,
+// and so was the account's block. Without that, "not public" before was
+// "not known", and what is seen now is not a change.
+func (v *view) judged(f facts.Fact) bool {
+	_, policy := f.Attributes["policy_public"]
+	_, block := f.Attributes["public_access_block"]
+	if !policy || !block {
+		return false
+	}
+	for _, a := range v.snap.Facts {
+		if a.Kind == "aws.s3.account_public_access_block" && a.Source.Connector == f.Source.Connector && a.Source.Scope == f.Source.Scope {
+			return true
+		}
+	}
+	return false
+}
+
 // publicBuckets rates what only two snapshots together show: a bucket that
 // is public now and was not (whether its policy, its own block or the
 // account's block changed), and an account's block that stopped
@@ -135,14 +172,17 @@ func restricts(settings any) bool {
 func (d *differ) publicBuckets(f facts.Fact) (severity, rule string) {
 	switch f.Kind {
 	case "aws.s3.bucket":
-		if o, existed := d.old.facts[f.ID]; d.new.bucketPublic(f) && !(existed && d.old.bucketPublic(o)) {
+		// A bucket seen for the first time and public is high. One that
+		// was there is high only when the earlier scan knew it was not.
+		o, existed := d.old.facts[f.ID]
+		if d.new.bucketPublic(f) && (!existed || d.old.judged(o) && !d.old.bucketPublic(o)) {
 			return High, "bucket-made-public"
 		}
 	case "aws.s3.account_public_access_block":
 		// Opening the account's block opens every bucket with a public
 		// policy at once; their own facts do not change, so it is said here.
 		for _, b := range d.new.snap.Facts {
-			if o, existed := d.old.facts[b.ID]; d.new.bucketPublic(b) && existed && !d.old.bucketPublic(o) && o.StructuralHash == b.StructuralHash {
+			if o, existed := d.old.facts[b.ID]; d.new.bucketPublic(b) && existed && d.old.judged(o) && !d.old.bucketPublic(o) && o.StructuralHash == b.StructuralHash {
 				return High, "bucket-made-public"
 			}
 		}

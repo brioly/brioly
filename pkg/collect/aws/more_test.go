@@ -722,7 +722,7 @@ func TestARoleWithoutTheNewPermissions(t *testing.T) {
 	for kind, want := range map[string]string{
 		"aws.apigateway.api": facts.CoverageDenied, "aws.sqs.queue": facts.CoverageDenied, "aws.sns.topic": facts.CoverageDenied,
 		"aws.dynamodb.table": facts.CoverageDenied, "aws.elasticache.cache": facts.CoverageDenied, "aws.lambda.event_source_mapping": facts.CoverageDenied,
-		"aws.s3.bucket": facts.CoverageDenied, "aws.s3.account_public_access_block": "", "aws.cloudfront.distribution": facts.CoverageDenied, "aws.route53.hosted_zone": facts.CoverageDenied,
+		"aws.s3.bucket": facts.CoverageDenied, "aws.s3.account_public_access_block": facts.CoverageComplete, "aws.cloudfront.distribution": facts.CoverageDenied, "aws.route53.hosted_zone": facts.CoverageDenied,
 		"aws.route53.record": facts.CoverageSkipped, "aws.iam.role": facts.CoverageDenied,
 		"aws.ecs.service": facts.CoverageComplete, "aws.rds.cluster": facts.CoverageComplete, "aws.elbv2.load_balancer": facts.CoverageComplete,
 	} {

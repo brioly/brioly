@@ -118,7 +118,11 @@ func (s *Snapshot) CarryForward(prev *Snapshot) (staleFacts, staleEdges int) {
 
 // fill copies the attributes and details that only prev has into f and
 // reports whether it copied any. Volatile values are live state and are
-// never carried.
+// never carried. Neither is "unread" (kinds.go): it says what this scan
+// was refused for this resource, and f was read in this scan, so f's own
+// word on that, a mark or none, is the current one. (A fact this scan did
+// not read at all is carried whole, with its mark: that is still the truth
+// about the values carried with it.)
 func fill(f *Fact, prev Fact) bool {
 	has := func(key string) bool {
 		_, a := f.Attributes[key]
@@ -128,7 +132,7 @@ func fill(f *Fact, prev Fact) bool {
 	}
 	filled := false
 	for key, v := range prev.Attributes {
-		if !has(key) {
+		if key != "unread" && !has(key) {
 			if f.Attributes == nil {
 				f.Attributes = map[string]any{}
 			}

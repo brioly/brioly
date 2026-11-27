@@ -427,6 +427,39 @@ func TestBucketAndRoleSeverity(t *testing.T) {
 	if got := high(snap(none, open, false), snap(none, map[string][2]any{"a": {true, []string{"BlockPublicAcls"}}, "b": {true, none}, "locked": {nil, none}}, false)); len(got) != 0 {
 		t.Errorf("events of an unrelated setting = %v", got)
 	}
+	// Something that becomes readable did not change. A bucket whose
+	// policy status was refused and is now read as public, and a bucket
+	// seen while the account's block was not read, raise nothing.
+	if got := high(snap(none, map[string][2]any{"locked": {nil, none}}, false), snap(none, map[string][2]any{"locked": {true, none}}, false)); len(got) != 0 {
+		t.Errorf("a bucket that became readable: %v", got)
+	}
+	noAccount := snap(none, open, false)
+	for i, f := range noAccount.Facts {
+		if f.Kind == "aws.s3.account_public_access_block" {
+			noAccount.Facts = append(noAccount.Facts[:i], noAccount.Facts[i+1:]...)
+			break
+		}
+	}
+	if err := noAccount.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if got := high(noAccount, snap(none, open, false)); len(got) != 0 {
+		t.Errorf("an account block that became readable: %v", got)
+	}
+	// Likewise a role whose trust policy could not be read before.
+	role := func(attrs map[string]any) *facts.Snapshot {
+		s := &facts.Snapshot{Coverage: []facts.Coverage{{Connector: "aws", Scope: src.Scope, Kind: "aws.iam.role", Status: facts.CoverageComplete}}}
+		f := facts.NewObserved("aws:role", "aws.iam.role", "role", src, facts.SourceRef{Type: facts.RefARN, Value: "role"}, time.Unix(0, 0))
+		f.Attributes = attrs
+		s.Facts = []facts.Fact{f}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if got := high(role(map[string]any{"unread": []string{"trust_policy"}}), role(map[string]any{"trusts_anyone": true})); len(got) != 0 {
+		t.Errorf("a trust policy that became readable: %v", got)
+	}
 	// A bucket that is public on the day it is first seen.
 	if got := high(snap(none, base, false), snap(none, map[string][2]any{"a": {false, none}, "b": {true, restrict}, "locked": {nil, none}, "new": {true, none}}, false)); got["aws:new"] != "bucket-made-public" {
 		t.Errorf("a new public bucket: %v", got)

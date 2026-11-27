@@ -515,7 +515,7 @@ func errLimit(what string, limit int) error {
 // listed": it is absent, and nothing failed.
 var goneCodes = map[string]bool{
 	"NoSuchBucket": true, "NoSuchEntity": true, "ResourceNotFoundException": true, "NotFoundException": true,
-	"AWS.SimpleQueueService.NonExistentQueue": true, "QueueDoesNotExist": true, "NotFound": true,
+	"AWS.SimpleQueueService.NonExistentQueue": true, "QueueDoesNotExist": true, "NotFound": true, "NoSuchHostedZone": true,
 }
 
 func gone(err error) bool { return err != nil && goneCodes[errorCode(err)] }

@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/elasticache"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
@@ -500,8 +501,8 @@ func TestTrustPolicyReadings(t *testing.T) {
 		`{"Statement":[{"Effect":"Allow","Principal":{"AWS":["arn:aws:iam::999988887777:role/x","999988887777"]}}]}`:           "[999988887777] [] false",
 		`{"Statement":[{"Effect":"Deny","Principal":"*"}]}`:                                                                    "[] [] false",
 	} {
-		tr := trustOf(doc)
-		if got := fmt.Sprint(tr.accounts, tr.flags, tr.anyone); got != want {
+		tr, ok := trustOf(doc)
+		if got := fmt.Sprint(tr.accounts, tr.flags, tr.anyone); got != want || !ok {
 			t.Errorf("%s\n  = %s, want %s", doc, got, want)
 		}
 	}
@@ -550,5 +551,60 @@ func TestARegionWithoutServerlessCaches(t *testing.T) {
 	res := regional(Clients{ElastiCache: noServerless{fakeElastiCache{g: 1}}})
 	if c := coverageOf(res, "aws.elasticache.cache"); c.Status != facts.CoverageComplete {
 		t.Errorf("coverage = %+v, want complete", c)
+	}
+}
+
+// ---- Second review ----
+
+// The account's block is read whether or not buckets could be listed:
+// buckets kept from an earlier scan are judged against it.
+func TestAccountBlockIsReadWithoutTheBucketListing(t *testing.T) {
+	res := global(GlobalClients{S3: deniedAll{}, S3Control: fakeS3Control{}})
+	fs, _ := index(res)
+	if _, ok := fs[AccountBlockID(acct)]; !ok || coverageOf(res, "aws.s3.account_public_access_block").Status != facts.CoverageComplete {
+		t.Errorf("account block: fact %v, coverage %+v", ok, coverageOf(res, "aws.s3.account_public_access_block"))
+	}
+}
+
+type vanishingZone struct{ fakeRoute53 }
+
+func (vanishingZone) ListResourceRecordSets(context.Context, *route53.ListResourceRecordSetsInput, ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error) {
+	return nil, code("NoSuchHostedZone")
+}
+
+func TestAZoneDeletedDuringTheScanIsAbsent(t *testing.T) {
+	res := global(GlobalClients{Route53: vanishingZone{}})
+	if len(res.Facts) != 0 {
+		t.Errorf("facts of a deleted zone: %d", len(res.Facts))
+	}
+	for _, kind := range []string{"aws.route53.hosted_zone", "aws.route53.record"} {
+		if c := coverageOf(res, kind); c.Status != facts.CoverageComplete {
+			t.Errorf("coverage of %s = %+v", kind, c)
+		}
+	}
+}
+
+type oddTrust struct{ fakeIAM }
+
+func (oddTrust) ListRoles(context.Context, *iam.ListRolesInput, ...func(*iam.Options)) (*iam.ListRolesOutput, error) {
+	return &iam.ListRolesOutput{Roles: []iamtypes.Role{{Arn: aws.String(roleARN), RoleName: aws.String("resize-role"), Path: aws.String("/"),
+		AssumeRolePolicyDocument: aws.String("%7Bnot a policy")}}}, nil
+}
+
+func TestAnUnreadableTrustPolicyIsNotNobody(t *testing.T) {
+	fs, _ := index(global(GlobalClients{IAM: oddTrust{}}))
+	role := fs[facts.AWSID(roleARN)]
+	if !equal(role.Attributes["unread"], []string{"trust_policy"}) {
+		t.Errorf("role = %+v", role.Attributes)
+	}
+	for _, key := range []string{"trusted_services", "trusted_accounts", "trust_flags", "trusts_anyone"} {
+		if _, set := role.Attributes[key]; set {
+			t.Errorf("%s is set from a policy that could not be read", key)
+		}
+	}
+	for _, doc := range []string{"", "{}", `{"Statement":[{"Effect":"Allow","Principal":7}]}`, `{"Statement":[{"Effect":"Allow"}]}`} {
+		if _, ok := trustOf(doc); ok {
+			t.Errorf("trustOf(%q) claims to have read a policy", doc)
+		}
 	}
 }

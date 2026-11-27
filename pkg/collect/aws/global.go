@@ -80,8 +80,10 @@ func (s *scan) collectS3() {
 
 	// The account's own block overrides what a bucket allows. It is one
 	// fact of its own, so that changing it is one change. Its coverage is
-	// its own too: a role that may not read it leaves buckets complete.
-	if s.g.S3Control != nil && err == nil {
+	// its own too: a role that may not read it leaves buckets complete,
+	// and it is read whether or not the buckets could be listed (buckets
+	// kept from an earlier scan are judged against it).
+	if s.g.S3Control != nil {
 		out, e := s.g.S3Control.GetPublicAccessBlock(s.ctx, &s3control.GetPublicAccessBlockInput{AccountId: aws.String(s.acct.ID)})
 		settings, read := []string{}, false
 		switch {
@@ -363,14 +365,15 @@ func (s *scan) collectRoute53() {
 			s.add(f)
 			continue
 		}
-		s.add(f)
 		switch e := s.collectRecords(f.ID, arn, name, z.Id); {
 		case gone(e):
+			continue // the zone was deleted after it was listed
 		case errors.Is(e, errRecordLimit):
 			rlimit = errLimit("record sets of a hosted zone", maxRecordSets)
 		case e != nil:
 			rerr = e
 		}
+		s.add(f)
 	}
 	s.cover("aws.route53.hosted_zone", err)
 	if err == nil && rerr == nil && rlimit != nil {
@@ -518,12 +521,17 @@ func (s *scan) collectIAMRoles() {
 		r := roles[i]
 		f := s.fact(aws.ToString(r.Arn), "aws.iam.role", aws.ToString(r.RoleName))
 		f.Attributes["path"] = aws.ToString(r.Path)
-		t := trustOf(aws.ToString(r.AssumeRolePolicyDocument))
-		f.Attributes["trusted_services"] = t.services
-		f.Attributes["trusted_accounts"] = t.accounts
-		f.Attributes["trusted_federated"] = t.federated
-		f.Attributes["trust_flags"] = t.flags
-		f.Attributes["trusts_anyone"] = t.anyone
+		// A trust policy that cannot be read as one says nothing about
+		// who is trusted: not "nobody".
+		if t, ok := trustOf(aws.ToString(r.AssumeRolePolicyDocument)); ok {
+			f.Attributes["trusted_services"] = t.services
+			f.Attributes["trusted_accounts"] = t.accounts
+			f.Attributes["trusted_federated"] = t.federated
+			f.Attributes["trust_flags"] = t.flags
+			f.Attributes["trusts_anyone"] = t.anyone
+		} else {
+			f.Attributes["unread"] = []string{"trust_policy"}
+		}
 
 		var attached []string
 		ap := iam.NewListAttachedRolePoliciesPaginator(s.g.IAM, &iam.ListAttachedRolePoliciesInput{RoleName: r.RoleName})
@@ -595,17 +603,18 @@ type trust struct {
 // cannot say is said in flags: a statement that allows "*", one that
 // allows everyone except named principals (NotPrincipal), and one that
 // trusts an identity provider, each with or without a Condition. The
-// conditions themselves are not kept.
-func trustOf(document string) trust {
-	t := trust{services: []string{}, accounts: []string{}, federated: []string{}, flags: []string{}}
+// conditions themselves are not kept. ok is false when the document is not
+// a policy this can read.
+func trustOf(document string) (t trust, ok bool) {
+	t = trust{services: []string{}, accounts: []string{}, federated: []string{}, flags: []string{}}
 	if decoded, err := url.QueryUnescape(document); err == nil {
 		document = decoded
 	}
 	var doc struct {
 		Statement json.RawMessage
 	}
-	if json.Unmarshal([]byte(document), &doc) != nil {
-		return t
+	if json.Unmarshal([]byte(document), &doc) != nil || len(doc.Statement) == 0 {
+		return t, false
 	}
 	type statement struct {
 		Effect       string
@@ -617,7 +626,7 @@ func trustOf(document string) trust {
 	if json.Unmarshal(doc.Statement, &statements) != nil {
 		var one statement
 		if json.Unmarshal(doc.Statement, &one) != nil {
-			return t
+			return t, false
 		}
 		statements = []statement{one}
 	}
@@ -637,6 +646,12 @@ func trustOf(document string) trust {
 		if len(st.NotPrincipal) > 0 && string(st.NotPrincipal) != "null" {
 			flag("not_principal")
 		}
+		if len(st.Principal) == 0 || string(st.Principal) == "null" {
+			if len(st.NotPrincipal) == 0 {
+				return t, false // an Allow that names nobody is not a trust policy
+			}
+			continue
+		}
 		var all string
 		if json.Unmarshal(st.Principal, &all) == nil {
 			if all == "*" {
@@ -646,14 +661,14 @@ func trustOf(document string) trust {
 		}
 		var byType map[string]json.RawMessage
 		if json.Unmarshal(st.Principal, &byType) != nil {
-			continue
+			return t, false
 		}
 		for typ, raw := range byType {
 			var values []string
 			if json.Unmarshal(raw, &values) != nil {
 				var one string
 				if json.Unmarshal(raw, &one) != nil {
-					continue
+					return t, false
 				}
 				values = []string{one}
 			}
@@ -684,5 +699,5 @@ func trustOf(document string) trust {
 		}
 	}
 	t.services, t.accounts, t.federated, t.flags = facts.SortedStrings(t.services), facts.SortedStrings(t.accounts), facts.SortedStrings(t.federated), facts.SortedStrings(t.flags)
-	return t
+	return t, true
 }
