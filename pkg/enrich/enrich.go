@@ -774,9 +774,11 @@ func jdSchema() json.RawMessage {
 //     component is named in the request;
 //   - the answer about a component the picture does not have: what it was
 //     written from is not known;
-//   - any other answer whose text holds the identifier or the name of one
-//     of the facts. The state may be older than the picture, and a fact
-//     may have belonged to another component then.
+//   - any other answer whose text holds one of the words that name the
+//     facts (Words): a fact's identifier or name, or the identifier or
+//     name of a component that goes with its anchor. The state may be
+//     older than the picture, and a fact may have belonged to another
+//     component then.
 //
 // The answers that stay are reused by the next Run when their input is
 // unchanged. Those that went are written from the facts that are left,
@@ -797,19 +799,9 @@ func Forget(state *State, picture *facts.Snapshot, ids []string) (*State, int) {
 	for _, id := range ids {
 		gone[id] = true
 	}
-	// The words that name a fact in prose: its identifier (citations) and
-	// its name.
 	words := map[string]bool{}
-	for _, f := range picture.Facts {
-		if gone[f.ID] {
-			words[f.ID] = true
-			if f.Name != "" {
-				words[f.Name] = true
-			}
-		}
-	}
-	for id := range gone {
-		words[id] = true
+	for _, w := range Words(picture, ids) {
+		words[w] = true
 	}
 	touched := map[string]bool{} // components with one of the facts
 	known := map[string]bool{}
@@ -865,6 +857,49 @@ func Forget(state *State, picture *facts.Snapshot, ids []string) (*State, int) {
 		out.Units[key] = u
 	}
 	return out, dropped
+}
+
+// Words lists what names the given facts in a text a model wrote from the
+// picture, sorted: each fact's identifier and its name, the identifier of
+// the component it would be the anchor of (a text cites a component as
+// [[cmp_…]]), and the identifier and name of every component of the
+// picture whose anchor is one of the facts. Empty names are left out. A
+// caller that removes those facts for good searches what was written
+// before for these words (Forget does, in the stored answers).
+//
+// A text can still describe a fact without any of them.
+func Words(picture *facts.Snapshot, ids []string) []string {
+	gone := map[string]bool{}
+	set := map[string]bool{}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		gone[id] = true
+		set[id] = true
+		set[facts.ComponentID(id)] = true
+	}
+	if picture != nil {
+		for _, f := range picture.Facts {
+			if gone[f.ID] && f.Name != "" {
+				set[f.Name] = true
+			}
+		}
+		for _, c := range picture.Components {
+			if gone[c.Anchor] {
+				set[c.ID] = true
+				if c.Name != "" {
+					set[c.Name] = true
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for w := range set {
+		out = append(out, w)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // proseOf joins every string of a decoded JSON value.

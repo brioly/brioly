@@ -3,6 +3,7 @@ package enrich
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +108,26 @@ func TestForgetDropsWhatWasWrittenFromTheFacts(t *testing.T) {
 	named.Units[reports] = Unit{Input: "x", Response: json.RawMessage(`{"summary":"Reads from \"api\".","section_markdown":"x","workload_role":"unknown","unknowns":[]}`)}
 	if kept, _ = Forget(named, before, []string{"aws:td"}); len(kept.Units) != 0 {
 		t.Errorf("an answer that names the fact was kept: %v", keys(kept))
+	}
+	// So does one that cites the component that goes with its anchor, by
+	// identifier or by a name the registry gave it.
+	named.Units[reports] = Unit{Input: "x", Response: json.RawMessage(`{"summary":"x","section_markdown":"Reads from [[` + facts.ComponentID("aws:db") + `]].","workload_role":"unknown","unknowns":[]}`)}
+	if kept, _ = Forget(named, before, []string{"aws:db"}); len(kept.Units) != 0 {
+		t.Errorf("an answer that cites the component of the fact was kept: %v", keys(kept))
+	}
+	renamed := withReports(t)
+	for i := range renamed.Components {
+		if renamed.Components[i].Anchor == "aws:db" {
+			renamed.Components[i].Name = "Orders database"
+		}
+	}
+	named.Units[reports] = Unit{Input: "x", Response: json.RawMessage(`{"summary":"Copies the Orders database nightly.","section_markdown":"x","workload_role":"unknown","unknowns":[]}`)}
+	if kept, _ = Forget(named, renamed, []string{"aws:db"}); len(kept.Units) != 0 {
+		t.Errorf("an answer that names the component of the fact was kept: %v", keys(kept))
+	}
+	if w := Words(renamed, []string{"aws:db", ""}); !slices.Contains(w, "Orders database") || !slices.Contains(w, "main-db") || !slices.Contains(w, "aws:db") ||
+		!slices.Contains(w, facts.ComponentID("aws:db")) || slices.Contains(w, "") || !slices.IsSorted(w) {
+		t.Errorf("words = %v", w)
 	}
 	// An answer about a component the picture does not have goes.
 	named.Units["component:cmp_000000000000"] = Unit{Input: "x", Response: json.RawMessage(`{}`)}

@@ -146,3 +146,73 @@ func TestStripFactsLeavesASnapshotWithoutThemAlone(t *testing.T) {
 		t.Error("no snapshot, no error")
 	}
 }
+
+// A workload that runs in a cluster and the manifest it is deployed from
+// are one component, named after the running one. Without the running one
+// the manifest is grouped by itself, under another component. That
+// regrouping belongs to taking the fact out and to putting it back, and to
+// nothing between: scans made while it is out compare equal, and a scan
+// that has it again, compared without it, shows no change either. (A
+// caller that lets the fact back in compares that way, and then keeps the
+// whole scan.)
+func TestRegroupingIsNotAChangeBetweenScans(t *testing.T) {
+	scanned := func(id string) *facts.Snapshot {
+		live := workload("k8s:prod/api")
+		live.Attributes["namespace"], live.Name = "default", "api"
+		manifest := workload("gh:acme/shop:k8s/api.yaml")
+		manifest.Attributes["namespace"], manifest.Name = "default", "api"
+		manifest.Source = facts.Source{Connector: "github", Scope: "acme/shop"}
+		s := &facts.Snapshot{ID: id, Facts: []facts.Fact{vpc("main"), live, manifest}, Coverage: []facts.Coverage{
+			{Connector: "kubernetes", Scope: "prod", Kind: "k8s.workload", Status: facts.CoverageComplete},
+			{Connector: "github", Scope: "acme/shop", Kind: "k8s.workload", Status: facts.CoverageComplete},
+			{Connector: "aws", Kind: "aws.ec2.vpc", Status: facts.CoverageComplete},
+		}}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		if err := rebuild(s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	all := scanned("all")
+	out, _, err := WithoutFacts(all, "k8s:prod/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape := func(s *facts.Snapshot) string {
+		var b strings.Builder
+		for _, c := range s.Components {
+			b.WriteString(c.ID + " " + c.Anchor + " " + strings.Join(c.Members, ",") + "\n")
+		}
+		return b.String()
+	}
+	if shape(all) == shape(out) || len(out.Components) == 0 {
+		t.Fatalf("the fixture does not regroup:\n%s---\n%s", shape(all), shape(out))
+	}
+	// While it is out.
+	next, _, err := WithoutFacts(scanned("next"), "k8s:prod/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := diff.Compare(out, next); res.Rebaselined || len(res.Events) != 0 {
+		t.Errorf("a scan while the fact is out: %+v", res.Events)
+	}
+	// Let back in: compared whole, the regrouping reads as changes, which
+	// is why it is compared without the fact.
+	back := scanned("back")
+	if res := diff.Compare(out, back); len(res.Events) == 0 {
+		t.Fatal("the fixture shows no change when the fact returns: the comparison below proves nothing")
+	}
+	compared, _, err := WithoutFacts(back, "k8s:prod/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := diff.Compare(out, compared); res.Rebaselined || len(res.Events) != 0 {
+		t.Errorf("the scan that has the fact again, compared without it: %+v", res.Events)
+	}
+	// And from then on whole against whole.
+	if res := diff.Compare(back, scanned("after")); len(res.Events) != 0 {
+		t.Errorf("the scan after the return: %+v", res.Events)
+	}
+}
