@@ -390,18 +390,80 @@ func Without(snap *facts.Snapshot, connectors ...string) (out *facts.Snapshot, r
 // only copy and has no use for the original: a large snapshot is then held
 // in memory once, not twice. On error the snapshot must not be used.
 func Strip(snap *facts.Snapshot, connectors ...string) (removed int, err error) {
-	if snap == nil {
-		return 0, errors.New("a snapshot is needed")
-	}
-	out := snap
 	drop := map[string]bool{}
 	for _, c := range connectors {
 		drop[c] = true
 	}
+	return strip(snap, func(f *facts.Fact) bool { return drop[f.Source.Connector] }, func(c *facts.Coverage) bool { return drop[c.Connector] })
+}
+
+// WithoutFacts returns a copy of a finalized snapshot with the named facts
+// taken out, and every relationship that had one of them at an end. What is
+// left is put together again from itself, as Without does: relationships
+// made by grouping rules and components are derived anew, so nothing in
+// the result was made from what was removed. A component anchored on a
+// removed fact is gone (its other members are grouped again by the rules,
+// under another anchor or under none); one that only had such a fact as a
+// member is built without it. The argument is not changed.
+//
+// It is how a caller leaves out single resources it was told not to keep.
+// Coverage is left as it is: the scan did read those kinds, and what it
+// read of the other resources stands. An identifier the snapshot does not
+// have is ignored.
+//
+// removed is how many facts were taken out.
+func WithoutFacts(snap *facts.Snapshot, ids ...string) (out *facts.Snapshot, removed int, err error) {
+	if snap == nil {
+		return nil, 0, errors.New("a snapshot is needed")
+	}
+	out, err = clone(snap)
+	if err != nil {
+		return nil, 0, err
+	}
+	removed, err = StripFacts(out, ids...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, removed, nil
+}
+
+// StripFacts is WithoutFacts done to the snapshot itself (see Strip). When
+// the snapshot has none of the facts it is left exactly as it is, not put
+// together again: removed is 0. On error the snapshot must not be used.
+func StripFacts(snap *facts.Snapshot, ids ...string) (removed int, err error) {
+	if snap == nil {
+		return 0, errors.New("a snapshot is needed")
+	}
+	drop := map[string]bool{}
+	for _, id := range ids {
+		drop[id] = true
+	}
+	found := false
+	for i := range snap.Facts {
+		if drop[snap.Facts[i].ID] {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return 0, nil
+	}
+	return strip(snap, func(f *facts.Fact) bool { return drop[f.ID] }, func(*facts.Coverage) bool { return false })
+}
+
+// strip takes the facts and the coverage the two functions name out of the
+// snapshot itself, with every relationship that loses an end, and puts the
+// rest together again.
+func strip(snap *facts.Snapshot, dropFact func(*facts.Fact) bool, dropCoverage func(*facts.Coverage) bool) (removed int, err error) {
+	if snap == nil {
+		return 0, errors.New("a snapshot is needed")
+	}
+	out := snap
 	kept := map[string]bool{}
 	keep := out.Facts[:0]
-	for _, f := range out.Facts {
-		if drop[f.Source.Connector] {
+	for i := range out.Facts {
+		f := out.Facts[i]
+		if dropFact(&f) {
 			removed++
 			continue
 		}
@@ -411,8 +473,9 @@ func Strip(snap *facts.Snapshot, connectors ...string) (removed int, err error) 
 	clear(out.Facts[len(keep):]) // what was dropped is not kept alive by the slice
 	out.Facts = keep
 	coverage := out.Coverage[:0]
-	for _, c := range out.Coverage {
-		if !drop[c.Connector] {
+	for i := range out.Coverage {
+		c := out.Coverage[i]
+		if !dropCoverage(&c) {
 			coverage = append(coverage, c)
 		}
 	}

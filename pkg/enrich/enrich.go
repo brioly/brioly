@@ -757,3 +757,168 @@ func overviewSchema() json.RawMessage {
 func jdSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","additionalProperties":false,"required":["markdown","editor_notes_markdown"],"properties":{"markdown":{"type":"string"},"editor_notes_markdown":{"type":"string"}}}`)
 }
+
+// Forget returns a copy of the state without every answer that was, or may
+// have been, written from the named facts, and how many answers that is.
+// The caller is about to take those facts out of the snapshot for good
+// (scan.WithoutFacts) and must not keep, or send back to a model as a
+// "previous version", text that describes them. picture is the snapshot
+// as it is before they are taken out. The argument is not changed.
+//
+// What goes:
+//
+//   - the overview and every job description: both are written from the
+//     whole snapshot;
+//   - the answer about a component that has one of the facts as a member,
+//     and about every component related to such a component: a related
+//     component is named in the request;
+//   - the answer about a component the picture does not have: what it was
+//     written from is not known;
+//   - any other answer whose text holds one of the words that name the
+//     facts (Words): a fact's identifier or name, or the identifier or
+//     name of a component that goes with its anchor. The state may be
+//     older than the picture, and a fact may have belonged to another
+//     component then.
+//
+// The answers that stay are reused by the next Run when their input is
+// unchanged. Those that went are written from the facts that are left,
+// with no earlier version to revise.
+//
+// The last rule goes by the text: an answer written from an older picture
+// in which the fact belonged to its component, and that names the fact
+// neither by identifier nor by name, stays.
+func Forget(state *State, picture *facts.Snapshot, ids []string) (*State, int) {
+	out := &State{Version: StateVersion, Units: map[string]Unit{}}
+	if state == nil {
+		return out, 0
+	}
+	if state.Version != StateVersion || picture == nil {
+		return out, len(state.Units)
+	}
+	gone := map[string]bool{}
+	for _, id := range ids {
+		gone[id] = true
+	}
+	words := map[string]bool{}
+	for _, w := range Words(picture, ids) {
+		words[w] = true
+	}
+	touched := map[string]bool{} // components with one of the facts
+	known := map[string]bool{}
+	for _, c := range picture.Components {
+		known[c.ID] = true
+		if gone[c.Anchor] {
+			touched[c.ID] = true
+		}
+		for _, m := range c.Members {
+			if gone[m] {
+				touched[c.ID] = true
+			}
+		}
+	}
+	affected := map[string]bool{}
+	for id := range touched {
+		affected[id] = true
+	}
+	for _, r := range components.Relations(picture) {
+		if touched[r.From] {
+			affected[r.To] = true
+		}
+		if touched[r.To] {
+			affected[r.From] = true
+		}
+	}
+	dropped := 0
+	for key, u := range state.Units {
+		id, isComponent := strings.CutPrefix(key, "component:")
+		keep := isComponent && known[id] && !affected[id]
+		if keep {
+			// As a JSON string writes it and as it reads, to find a name
+			// with a character JSON escapes.
+			text := string(u.Response)
+			var plain any
+			if json.Unmarshal(u.Response, &plain) == nil {
+				if flat, err := json.Marshal(plain); err == nil {
+					text += "\n" + string(flat)
+				}
+				text += "\n" + proseOf(plain)
+			}
+			for w := range words {
+				if strings.Contains(text, w) {
+					keep = false
+					break
+				}
+			}
+		}
+		if !keep {
+			dropped++
+			continue
+		}
+		out.Units[key] = u
+	}
+	return out, dropped
+}
+
+// Words lists what names the given facts in a text a model wrote from the
+// picture, sorted: each fact's identifier and its name, the identifier of
+// the component it would be the anchor of (a text cites a component as
+// [[cmp_…]]), and the identifier and name of every component of the
+// picture whose anchor is one of the facts. Empty names are left out. A
+// caller that removes those facts for good searches what was written
+// before for these words (Forget does, in the stored answers).
+//
+// A text can still describe a fact without any of them.
+func Words(picture *facts.Snapshot, ids []string) []string {
+	gone := map[string]bool{}
+	set := map[string]bool{}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		gone[id] = true
+		set[id] = true
+		set[facts.ComponentID(id)] = true
+	}
+	if picture != nil {
+		for _, f := range picture.Facts {
+			if gone[f.ID] && f.Name != "" {
+				set[f.Name] = true
+			}
+		}
+		for _, c := range picture.Components {
+			if gone[c.Anchor] {
+				set[c.ID] = true
+				if c.Name != "" {
+					set[c.Name] = true
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for w := range set {
+		out = append(out, w)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// proseOf joins every string of a decoded JSON value.
+func proseOf(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case []any:
+		parts := make([]string, 0, len(t))
+		for _, x := range t {
+			parts = append(parts, proseOf(x))
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		parts := make([]string, 0, len(t))
+		for _, x := range t {
+			parts = append(parts, proseOf(x))
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}

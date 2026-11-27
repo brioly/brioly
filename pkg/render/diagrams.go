@@ -195,6 +195,22 @@ func (d *Diagrams) Resource(view, box string) (*ResourcePanel, bool) {
 	return p, ok
 }
 
+// FactID returns the identifier of the fact a box of a view stands for,
+// for a caller that acts on the resource a reader has open: a box's own ID
+// is made for the picture and names nothing. False for a box that is not a
+// resource (a group, an area) or not in the view.
+func (d *Diagrams) FactID(view, box string) (string, bool) {
+	sc, ok := d.byID[view]
+	if !ok {
+		return "", false
+	}
+	id, ok := sc.facts[box]
+	if _, drawn := d.panels[id]; !ok || !drawn {
+		return "", false
+	}
+	return id, true
+}
+
 func panelText1(v any) string {
 	var s string
 	switch t := v.(type) {
