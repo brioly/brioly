@@ -106,11 +106,12 @@ func linkHosts(s *facts.Snapshot) {
 			buckets[f.Name] = append(buckets[f.Name], f.ID)
 		case "aws.cloudfront.distribution":
 			distributions = append(distributions, f)
+			// A record is linked to a distribution (or an API, below) only
+			// when the record's own target is its address. Its alternate
+			// domain names are a claim to a name, not where the name
+			// points: the record may send that name elsewhere.
 			if h := hostOnly(attrString(f, "domain_name")); h != "" {
 				endpoints[h] = append(endpoints[h], f.ID)
-			}
-			for _, d := range stringList(attr(f, "aliases")) {
-				names[d] = append(names[d], f.ID)
 			}
 		case "aws.apigateway.api":
 			apis = append(apis, f)
@@ -118,9 +119,6 @@ func linkHosts(s *facts.Snapshot) {
 				if h = hostOnly(h); h != "" {
 					endpoints[h] = append(endpoints[h], f.ID)
 				}
-			}
-			for _, d := range stringList(attr(f, "domains")) {
-				names[d] = append(names[d], f.ID)
 			}
 		case "aws.elasticache.cache":
 			for _, key := range []string{"endpoint", "reader_endpoint"} {

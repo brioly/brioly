@@ -44,8 +44,6 @@ func addedSeverity(f facts.Fact) (severity, rule string) {
 		return High, "ingress-open-to-internet"
 	case strings.HasPrefix(f.Kind, "aws.rds.") && f.Attributes["publicly_accessible"] == true:
 		return High, "database-made-public"
-	case f.Kind == "aws.s3.bucket" && bucketPublic(f.Attributes):
-		return High, "bucket-made-public"
 	case f.Kind == "aws.iam.role" && f.Attributes["trusts_anyone"] == true:
 		return High, "role-trusts-anyone"
 	}
@@ -62,24 +60,6 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 		// A specific rule also replaces the generic one at the same level.
 		if severityRank[s] < severityRank[severity] || (s == severity && rule == "structural") {
 			severity, rule = s, r
-		}
-	}
-	// A bucket is judged whole: its policy and the public access blocks
-	// decide together, and a change to any of them can open it.
-	if f.Kind == "aws.s3.bucket" && bucketPublic(f.Attributes) {
-		before := map[string]any{}
-		for k, v := range f.Attributes {
-			before[k] = v
-		}
-		touched := false
-		for _, c := range changes {
-			switch c.Attribute {
-			case "policy_public", "public_access_block", "account_public_access_block":
-				before[c.Attribute], touched = c.Before, true
-			}
-		}
-		if touched && !bucketPublic(before) {
-			raise(High, "bucket-made-public")
 		}
 	}
 	for _, c := range changes {
@@ -123,21 +103,51 @@ func structuralSeverity(f facts.Fact, changes []Change) (severity, rule string) 
 	return severity, rule
 }
 
-// bucketPublic reports whether a bucket's attributes say it is public: AWS
+// bucketPublic reports whether a bucket is public in a snapshot: AWS
 // reports its policy as public and RestrictPublicBuckets is on neither for
-// the bucket nor for its account (the rule of the exposure review).
-func bucketPublic(attrs map[string]any) bool {
-	if attrs["policy_public"] != true {
+// the bucket nor for its account (the rule of the exposure review). The
+// account's setting is a fact of its own.
+func (v *view) bucketPublic(f facts.Fact) bool {
+	if f.Kind != "aws.s3.bucket" || f.Attributes["policy_public"] != true || restricts(f.Attributes["public_access_block"]) {
 		return false
 	}
-	for _, key := range []string{"public_access_block", "account_public_access_block"} {
-		for _, v := range stringList(attrs[key]) {
-			if v == "RestrictPublicBuckets" {
-				return false
-			}
+	for _, a := range v.snap.Facts {
+		if a.Kind == "aws.s3.account_public_access_block" && a.Source.Connector == f.Source.Connector && a.Source.Scope == f.Source.Scope {
+			return !restricts(a.Attributes["settings"])
 		}
 	}
 	return true
+}
+
+func restricts(settings any) bool {
+	for _, v := range stringList(settings) {
+		if v == "RestrictPublicBuckets" {
+			return true
+		}
+	}
+	return false
+}
+
+// publicBuckets rates what only two snapshots together show: a bucket that
+// is public now and was not (whether its policy, its own block or the
+// account's block changed), and an account's block that stopped
+// restricting public buckets. It returns High and the rule, or "".
+func (d *differ) publicBuckets(f facts.Fact) (severity, rule string) {
+	switch f.Kind {
+	case "aws.s3.bucket":
+		if o, existed := d.old.facts[f.ID]; d.new.bucketPublic(f) && !(existed && d.old.bucketPublic(o)) {
+			return High, "bucket-made-public"
+		}
+	case "aws.s3.account_public_access_block":
+		// Opening the account's block opens every bucket with a public
+		// policy at once; their own facts do not change, so it is said here.
+		for _, b := range d.new.snap.Facts {
+			if o, existed := d.old.facts[b.ID]; d.new.bucketPublic(b) && existed && !d.old.bucketPublic(o) && o.StructuralHash == b.StructuralHash {
+				return High, "bucket-made-public"
+			}
+		}
+	}
+	return "", ""
 }
 
 // gains reports whether a list attribute has a value it did not have.

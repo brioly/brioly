@@ -282,6 +282,10 @@ func displayName(f facts.Fact) string {
 	case facts.StalePartly:
 		name += " (partly read in this scan)"
 	}
+	// AWS refused part of this one resource (kinds.go, "unread").
+	if len(listAttr(f, "unread")) > 0 {
+		name += " (not fully read)"
+	}
 	return name
 }
 

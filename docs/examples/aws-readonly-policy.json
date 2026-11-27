@@ -43,7 +43,7 @@
         "sqs:ListQueues",
         "sqs:GetQueueAttributes",
         "sns:ListTopics",
-        "sns:ListSubscriptions",
+        "sns:ListSubscriptionsByTopic",
         "dynamodb:ListTables",
         "dynamodb:DescribeTable",
         "elasticache:DescribeReplicationGroups",

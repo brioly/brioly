@@ -18,7 +18,11 @@ import (
 //     marked StalePartly when any were filled (a partial read, such as tags that
 //     could not be listed, returns a thinner fact);
 //   - an edge prev has and s lacks is copied and marked Stale when one of
-//     its ends is of such a kind and both ends still exist.
+//     its ends is of such a kind and both ends still exist;
+//   - likewise an edge whose producer names such a kind in the place of one
+//     of its ends: relationships read from a listing that makes no facts
+//     of its own (which queue triggers which function) are recorded under
+//     that listing's coverage kind.
 //
 // Edges made by grouping rules are not copied: they are derived again.
 // Nothing is carried when prev was classified differently (another baseline).
@@ -50,6 +54,16 @@ func (s *Snapshot) CarryForward(prev *Snapshot) (staleFacts, staleEdges int) {
 			return incomplete[own]
 		}
 		return incomplete[scope{f.Source.Connector, f.Source.Scope, AnyRegion, f.Kind}]
+	}
+
+	// unreadListing: the listing an edge was read from, in the place f is
+	// in, was not complete.
+	unreadListing := func(listing string, f Fact) bool {
+		if listing == "" {
+			return false
+		}
+		f.Kind = listing
+		return unread(f)
 	}
 
 	index := make(map[string]int, len(s.Facts))
@@ -90,7 +104,7 @@ func (s *Snapshot) CarryForward(prev *Snapshot) (staleFacts, staleEdges int) {
 		}
 		from, ok1 := byID[pe.From]
 		to, ok2 := byID[pe.To]
-		if !ok1 || !ok2 || !(unread(from) || unread(to)) {
+		if !ok1 || !ok2 || !(unread(from) || unread(to) || unreadListing(pe.Derivation.Producer, from) || unreadListing(pe.Derivation.Producer, to)) {
 			continue
 		}
 		pe.Stale = true

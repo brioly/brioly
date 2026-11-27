@@ -540,13 +540,13 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 
 | 서비스 | 부르는 것 | 남기지 않는 것 |
 |---|---|---|
-| S3 (계정에서 한 번) | `ListBuckets`, (리전이 없을 때만) `GetBucketLocation`, `GetPublicAccessBlock`, `GetBucketPolicyStatus`, `GetBucketNotificationConfiguration`, 계정의 `GetPublicAccessBlock` | 객체는 나열도 읽기도 하지 않음. 버킷 정책 문서와 ACL은 요청하지 않음. 알림의 이벤트 종류와 key 필터, 생성 시각 |
+| S3 (계정에서 한 번) | `ListBuckets`, (리전이 없을 때만) `GetBucketLocation`, `GetPublicAccessBlock`, `GetBucketPolicyStatus`, `GetBucketNotificationConfiguration`, 계정의 `GetPublicAccessBlock`(버킷마다 복사하지 않고 사실 하나 `aws.s3.account_public_access_block`으로 둠: 계정 설정 하나가 바뀌면 변경도 하나) | 객체는 나열도 읽기도 하지 않음. 버킷 정책 문서와 ACL은 요청하지 않음. 알림의 이벤트 종류와 key 필터, 생성 시각 |
 | CloudFront (한 번) | `ListDistributions` | custom origin header(이름과 값), 수정 시각, ETag, comment |
-| Route 53 (한 번) | `ListHostedZones`, `ListResourceRecordSets` | TXT와 A·AAAA·CNAME·MX·NS 밖의 모든 type의 값(Cloudflare 수집기와 같은 규칙) |
+| Route 53 (한 번) | `ListHostedZones`, `ListResourceRecordSets`(AWS 서비스가 관리하는 zone, 즉 `LinkedService`가 있는 Cloud Map·ECS service discovery zone의 레코드는 읽지 않음: task마다 레코드가 생겨 배포할 때마다 바뀜. zone은 `managed_by`와 함께 남김) | TXT와 A·AAAA·CNAME·MX·NS 밖의 모든 type의 값(Cloudflare 수집기와 같은 규칙) |
 | IAM (한 번) | `ListRoles`, Role마다 `ListAttachedRolePolicies`·`ListRolePolicies` | 권한 정책 문서는 요청하지 않음. trust policy는 principal만 쓰고 조건은 버림. 사용자·그룹·access key는 읽지 않음. `/aws-service-role/` Role은 사실로 만들지 않음 |
 | API Gateway (리전) | REST: `GetRestApis`, `GetResources`(embed=methods), `GetStages`, `GetVpcLinks`, `GetDomainNames`, `GetBasePathMappings`. HTTP·WebSocket: `GetApis`, `GetRoutes`, `GetIntegrations`, `GetStages`, `GetApiMappings` | resource policy, stage variable, request template, HTTP integration URI의 경로와 query(호스트만 남김). API key·export·authorizer는 요청하지 않음 |
 | SQS (리전) | `ListQueues`, `GetQueueAttributes`(이름을 지정한 속성만: ARN, FIFO, redrive policy, 암호화, visibility timeout, 보존 기간) | 큐 정책, 메시지 수, 시각은 요청하지 않음. 메시지는 받지 않음 |
-| SNS (리전) | `ListTopics`, `ListSubscriptions` | 구독 endpoint는 프로토콜이 sqs·lambda·firehose일 때만(ARN) 관계로 남김. 이메일 주소, 전화번호, URL은 남기지 않음 |
+| SNS (리전) | `ListTopics`, topic마다 `ListSubscriptionsByTopic`(최대 5쪽 = 500개. 넘는 topic은 일부만 읽지 않고 `unread`로 표시) | 구독 endpoint는 프로토콜이 sqs·lambda·firehose일 때만(ARN) 관계로 남김. 이메일 주소, 전화번호, URL은 남기지 않음. 구독 수는 volatile |
 | DynamoDB (리전) | `ListTables`, `DescribeTable` | 항목 수, 크기, stream label. 항목은 읽지 않음 |
 | ElastiCache (리전) | `DescribeReplicationGroups`, `DescribeCacheClusters`, `DescribeServerlessCaches` | replication group의 멤버 cluster는 사실로 만들지 않음(버전과 보안 그룹을 읽는 데만 씀) |
 | Lambda (리전) | `ListEventSourceMappings` | mapping은 사실이 아니고 관계만 만듦. coverage는 `aws.lambda.event_source_mapping`으로 따로 남김(권한이 없어도 함수의 coverage는 complete) |
@@ -557,8 +557,24 @@ Cloudflare API(v4)를 API 토큰으로 읽습니다(`pkg/collect/cloudflare`, br
 
 **컴포넌트**: cache와 table은 데이터 저장소입니다. 버킷·queue·topic은 계정마다 많고 대부분 문서가 다루는 흐름 밖에 있어서, 다른 사실과 관계(routes_to, depends_on, exposes)가 있을 때만 컴포넌트가 됩니다. 나머지도 문서의 표에는 나옵니다. IAM Role은 컴포넌트가 아니고 그 Role로 실행되는 워크로드의 멤버입니다.
 
-**공개 버킷의 판단**: `policy_public`(AWS의 `GetBucketPolicyStatus`)이 true이고 버킷과 계정 어느 쪽의 public access block에도 `RestrictPublicBuckets`가 켜져 있지 않을 때입니다. ACL로 열린 버킷은 판단하지 않고 문서의 "Not covered"에 적습니다.
+**공개 버킷의 판단**: `policy_public`(AWS의 `GetBucketPolicyStatus`)이 true이고 버킷과 계정(계정 사실) 어느 쪽의 public access block에도 `RestrictPublicBuckets`가 켜져 있지 않을 때입니다. ACL로 열린 버킷은 판단하지 않고 문서의 "Not covered"에 적습니다.
 
 **권한이 없는 Role**: 새 호출이 거부되면 그 kind의 coverage가 `denied`가 되고 다른 kind는 그대로입니다. 스캔은 실패하지 않습니다.
+
+**리소스 하나만 읽지 못한 경우** (`unread`): 목록은 읽혔는데 리소스 하나에 대한 호출만 결과가 다를 때는 원인별로 다르게 다룹니다.
+
+| 그 리소스에 대한 호출의 결과 | 처리 | 이유 |
+|---|---|---|
+| 목록 뒤에 삭제됨(`NoSuchBucket`, `NoSuchEntity`, `ResourceNotFoundException`, `NonExistentQueue`, `NotFoundException`) | 없는 것으로 봄. 오류 아님 | 실제로 없음 |
+| 거부(`AccessDenied` 계열. 예: 버킷 자신의 정책이 스캐너를 거부) | 사실은 남기고 구조 속성 `unread`에 읽지 못한 부분의 이름을 적음(`policy_status`, `attributes`, `routes` 등). 그 부분이 채웠을 속성은 없음. kind의 coverage는 `complete` | 매 스캔 똑같이 거부되므로 kind를 `partial`로 두면 그 계정·리전의 변경 이벤트가 영원히 나오지 않음(`pkg/diff`의 `stable`은 `partial`·`error`가 하나라도 있으면 그 범위에서 이벤트를 만들지 않음). "없다"가 아니라 "읽지 못했다"는 사실 자신이 말하고, 문서는 그 칸에 "not read"를, 이름 옆에 "(not fully read)"를 씀. 같은 거부는 같은 해시 |
+| 그 밖(throttle, timeout, 5xx) | 지금까지와 같이 kind가 `partial`. 읽지 못한 속성은 두지 않고(빈 값으로 두지 않음) 이전 스캔의 값을 이어받음 | 다음 스캔에서는 될 수 있으므로 값이 사라졌다 나타나면 안 됨 |
+
+`stable`은 바꾸지 않았습니다. Lambda event source mapping처럼 사실을 만들지 않는 목록에서 읽은 관계는 edge의 `producer`에 그 coverage kind를 적어, 그 목록이 실패한 스캔에서 `CarryForward`가 이전 관계를 이어받습니다.
+
+**읽는 양의 한도** (`pkg/collect/aws/aws.go`의 `max…`): 버킷 1000, Role 2000, hosted zone당 record set 20000, 리전마다 queue 2000, topic 2000, table 1000, API 종류별 300, topic당 구독 500. 한도에 닿으면 거기까지만 읽고 coverage를 `partial`로 남기며 detail에 한도를 적습니다(`pkg/collect/code`의 한도와 같은 방식). 한도에 계속 닿는 계정은 그 범위의 변경 이벤트가 나오지 않습니다(받아들인 한계). AWS가 목록을 돌려주는 순서는 보장되지 않으므로 한도 밖의 것이 스캔마다 달라질 수 있습니다. API Gateway `GetResources`는 계정당 2초에 5번으로 고정돼 있어(AWS 문서의 quota 표) 호출 사이를 0.5초 띄우고 재시도를 8번까지 합니다.
+
+**IAM trust policy**: `trusted_accounts`에는 계정 ID만 둡니다. 목록으로 말할 수 없는 것은 `trust_flags`에 둡니다: `anyone`(조건 없이 `*`), `anyone_with_conditions`, `not_principal`(이름을 댄 principal만 빼고 모두), `not_principal_with_conditions`, `federated_without_conditions`. 조건의 내용은 남기지 않습니다. 인터넷 노출 점검은 `anyone`·`not_principal`을 High, `federated_without_conditions`를 Medium으로 적습니다.
+
+**이름만으로는 잇지 않음**: Route 53(와 Cloudflare) 레코드를 CloudFront 배포나 API에 잇는 것은 레코드의 대상이 그 배포의 도메인 이름이나 API의 주소일 때뿐입니다. 배포의 alias나 API의 custom domain이 레코드 이름과 같다는 것만으로는 잇지 않습니다(레코드가 다른 곳을 가리킬 수 있음).
 
 **한계**: EC2 인스턴스 프로필과 EKS의 IRSA는 Role과 잇지 않습니다. API Gateway의 authorizer가 무엇을 검사하는지, CloudFront 뒤의 origin이 배포만 받는지는 읽지 않습니다. Route 53 zone은 다이어그램에 그리지 않습니다(DNS는 요청이 지나는 길이 아님). ElastiCache의 지원 종료일은 Redis OSS만 표에 있고(`amazon-elasticache-redis`) Valkey와 Memcached는 "모름"으로 나옵니다.

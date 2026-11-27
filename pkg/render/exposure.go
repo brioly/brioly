@@ -280,12 +280,30 @@ func reviewExposure(g *graph, raw *facts.Snapshot) (string, *exposureReview) {
 	notIAM := "- IAM: who may do what, access keys, cross-account trust.\n"
 	notStorage := "- Storage and its policies: S3 buckets, snapshots, backups.\n"
 	notFront := "- What sits in front of or beside a load balancer: CloudFront, API Gateway, WAF rules, network ACLs.\n"
-	if hasMore(raw) {
-		moreHigh = "; an S3 bucket whose policy AWS reports as public, unless a public access block restricts public buckets"
-		moreLow = "; a CloudFront distribution that serves plain HTTP without redirecting; a public API with routes that ask for no authorization at the gateway"
-		notIAM = "- IAM: what a role may do (policy documents are not read), the conditions of a trust policy, users, groups and access keys.\n"
+	moreMedium := ""
+	if scanned(raw, "aws.s3.bucket") {
+		moreHigh += "; an S3 bucket whose policy AWS reports as public, unless a public access block restricts public buckets"
 		notStorage = "- S3 beyond a bucket's public access block and AWS's own judgment of its policy: bucket and object ACLs, access points, presigned URLs, what the policy allows to whom. Snapshots and backups.\n"
+	}
+	if scanned(raw, "aws.iam.role") {
+		moreHigh += "; an IAM role whose trust policy lets any AWS principal assume it without a condition"
+		moreMedium = "; an IAM role that trusts an identity provider without any condition"
+		notIAM = "- IAM: what a role may do (policy documents are not read), the conditions of a trust policy, users, groups and access keys.\n"
+	}
+	cloudFront, apiGateway := scanned(raw, "aws.cloudfront.distribution"), scanned(raw, "aws.apigateway.api")
+	if cloudFront {
+		moreLow += "; a CloudFront distribution that serves plain HTTP without redirecting"
+	}
+	if apiGateway {
+		moreLow += "; a public API with routes that ask for no authorization at the gateway"
+	}
+	switch {
+	case cloudFront && apiGateway:
 		notFront = "- WAF rules, network ACLs, API Gateway resource policies, authorizers and API keys, CloudFront signed URLs, functions and whether an origin only admits its distribution.\n"
+	case cloudFront:
+		notFront = "- API Gateway, WAF rules, network ACLs, CloudFront signed URLs, functions and whether an origin only admits its distribution.\n"
+	case apiGateway:
+		notFront = "- CloudFront, WAF rules, network ACLs, API Gateway resource policies, authorizers and API keys.\n"
 	}
 
 	var b strings.Builder
@@ -310,7 +328,7 @@ func reviewExposure(g *graph, raw *facts.Snapshot) (string, *exposureReview) {
 	}
 	b.WriteString("How the level is decided:\n\n" +
 		"- **High**: a security group lets the whole internet reach every port, or a port of remote access, a database, a cache or cluster control; a database has a public address" + moreHigh + ".\n" +
-		"- **Medium**: a security group lets the whole internet reach another port that is not a web port; a Kubernetes API server answers any address; database storage is not encrypted" + cfMedium + ".\n" +
+		"- **Medium**: a security group lets the whole internet reach another port that is not a web port; a Kubernetes API server answers any address; database storage is not encrypted" + cfMedium + moreMedium + ".\n" +
 		"- **Low**: web ports (80, 443) or ICMP open to the internet, which a public site needs; an open group that nothing is attached to; plain HTTP without a redirect; tasks with public addresses; NodePort Services; a database instance in one availability zone" + cfLow + moreLow + ".\n\n")
 
 	b.WriteString("## What the internet can reach\n\n")

@@ -116,6 +116,11 @@ func (s *scan) collectElastiCache() {
 	for sp.HasMorePages() {
 		var out *elasticache.DescribeServerlessCachesOutput
 		if out, serr = sp.NextPage(s.ctx); serr != nil {
+			// A region that has no serverless caches at all does not know
+			// the operation: there are none, and nothing failed.
+			if unsupportedCodes[errorCode(serr)] {
+				serr = nil
+			}
 			break
 		}
 		for _, c := range out.ServerlessCaches {
@@ -147,6 +152,12 @@ func (s *scan) collectElastiCache() {
 	// One kind, three listings: a listing that failed leaves its caches
 	// unread, so the kind is not complete.
 	s.cover("aws.elasticache.cache", firstErr(rerr, cerr, serr))
+}
+
+// unsupportedCodes are how a regional endpoint says it does not have an
+// operation.
+var unsupportedCodes = map[string]bool{
+	"InvalidAction": true, "UnknownOperationException": true, "UnsupportedOperation": true,
 }
 
 // cacheClusterValues copies what only a cache cluster says onto f and
@@ -194,10 +205,25 @@ func (s *scan) collectDynamoDB() {
 			break
 		}
 		names = append(names, out.TableNames...)
+		if len(names) > maxTables {
+			break
+		}
+	}
+	var limit error
+	if len(names) > maxTables {
+		names, limit = names[:maxTables], errLimit("tables", maxTables)
 	}
 	for _, name := range names {
 		out, e := s.c.DynamoDB.DescribeTable(s.ctx, &dynamodb.DescribeTableInput{TableName: aws.String(name)})
-		if e != nil || out.Table == nil {
+		switch {
+		case gone(e):
+			continue // deleted after it was listed
+		case refused(e):
+			f := s.fact("arn:"+s.acct.Partition+":dynamodb:"+s.region+":"+s.acct.ID+":table/"+name, "aws.dynamodb.table", name)
+			_ = unread(&f, "description", e)
+			s.add(f)
+			continue
+		case e != nil || out.Table == nil:
 			derr = firstErr(derr, e)
 			continue
 		}
@@ -239,5 +265,5 @@ func (s *scan) collectDynamoDB() {
 		f.Volatile = map[string]any{"status": string(t.TableStatus)}
 		s.add(f)
 	}
-	s.coverParts("aws.dynamodb.table", err, derr, "describing tables")
+	s.coverLimit("aws.dynamodb.table", err, derr, limit, "describing tables")
 }

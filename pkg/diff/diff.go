@@ -226,6 +226,9 @@ func (d *differ) facts() {
 				continue // may simply have become readable again
 			}
 			sev, rule := addedSeverity(f)
+			if s, r := d.publicBuckets(f); s != "" {
+				sev, rule = s, r
+			}
 			d.emit(Event{Type: FactAdded, Severity: sev, RuleID: rule, Subject: id, Kind: f.Kind, Name: f.Name, ComponentID: d.new.owner[id]})
 			continue
 		}
@@ -235,6 +238,9 @@ func (d *differ) facts() {
 		if o.StructuralHash != f.StructuralHash {
 			changes := attributeChanges(o, f)
 			sev, rule := structuralSeverity(f, changes)
+			if s, r := d.publicBuckets(f); s != "" {
+				sev, rule = s, r
+			}
 			d.emit(Event{Type: StructuralChanged, Severity: sev, RuleID: rule, Subject: id, Kind: f.Kind, Name: f.Name, ComponentID: d.new.owner[id], Changes: changes})
 		}
 		if o.DetailHash != f.DetailHash {

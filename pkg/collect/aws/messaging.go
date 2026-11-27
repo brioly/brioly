@@ -2,6 +2,7 @@ package aws
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -39,18 +40,39 @@ func (s *scan) collectSQS() {
 			break
 		}
 		urls = append(urls, out.QueueUrls...)
+		if len(urls) > maxQueues {
+			break
+		}
+	}
+	var limit error
+	if len(urls) > maxQueues {
+		urls, limit = urls[:maxQueues], errLimit("queues", maxQueues)
 	}
 	for _, u := range urls {
 		out, e := s.c.SQS.GetQueueAttributes(s.ctx, &sqs.GetQueueAttributesInput{QueueUrl: aws.String(u), AttributeNames: queueAttributes})
-		if e != nil {
+		name := u[strings.LastIndex(u, "/")+1:]
+		// A queue's ARN follows from its URL: account and name.
+		arn := "arn:" + s.acct.Partition + ":sqs:" + s.region + ":" + s.acct.ID + ":" + name
+		if parts := strings.Split(u, "/"); len(parts) >= 2 {
+			arn = "arn:" + s.acct.Partition + ":sqs:" + s.region + ":" + parts[len(parts)-2] + ":" + name
+		}
+		switch {
+		case gone(e):
+			continue // deleted after it was listed
+		case refused(e):
+			// This queue's own policy refuses: it exists, and its
+			// settings are not known.
+			f := s.fact(arn, "aws.sqs.queue", name)
+			_ = unread(&f, "attributes", e)
+			s.add(f)
+			continue
+		case e != nil:
 			aerr = firstErr(aerr, e)
 			continue
 		}
 		a := out.Attributes
-		name := u[strings.LastIndex(u, "/")+1:]
-		arn := a["QueueArn"]
-		if arn == "" {
-			arn = "arn:" + s.acct.Partition + ":sqs:" + s.region + ":" + s.acct.ID + ":" + name
+		if a["QueueArn"] != "" {
+			arn = a["QueueArn"]
 		}
 		f := s.fact(arn, "aws.sqs.queue", name)
 		f.Attributes["fifo"] = a["FifoQueue"] == "true"
@@ -83,7 +105,7 @@ func (s *scan) collectSQS() {
 		}
 		s.add(f)
 	}
-	s.coverParts("aws.sqs.queue", err, aerr, "queue attributes")
+	s.coverLimit("aws.sqs.queue", err, aerr, limit, "queue attributes")
 }
 
 // ---- SNS ----
@@ -93,6 +115,10 @@ func (s *scan) collectSQS() {
 // number, a URL that may carry a token) is never kept.
 var arnProtocols = map[string]bool{"sqs": true, "lambda": true, "firehose": true}
 
+// collectSNS lists topics and, per topic, its subscriptions: at most
+// maxSubscriptionPage pages. A topic with more (a topic of mobile devices
+// can have millions) is marked as not read for its subscriptions rather
+// than read in part: which ones a part holds is not something to rely on.
 func (s *scan) collectSNS() {
 	if s.c.SNS == nil {
 		return
@@ -108,55 +134,79 @@ func (s *scan) collectSNS() {
 		for _, t := range out.Topics {
 			topics = append(topics, aws.ToString(t.TopicArn))
 		}
-	}
-	type subs struct {
-		protocols []string
-		count     int
-		targets   []string
-	}
-	byTopic := map[string]*subs{}
-	sp := sns.NewListSubscriptionsPaginator(s.c.SNS, &sns.ListSubscriptionsInput{})
-	var serr error
-	for sp.HasMorePages() {
-		var out *sns.ListSubscriptionsOutput
-		if out, serr = sp.NextPage(s.ctx); serr != nil {
+		if len(topics) > maxTopics {
 			break
 		}
-		for _, sub := range out.Subscriptions {
-			t := byTopic[aws.ToString(sub.TopicArn)]
-			if t == nil {
-				t = &subs{}
-				byTopic[aws.ToString(sub.TopicArn)] = t
-			}
-			protocol := aws.ToString(sub.Protocol)
-			t.count++
-			t.protocols = append(t.protocols, protocol)
-			if arnProtocols[protocol] {
-				t.targets = append(t.targets, lambdaARN(aws.ToString(sub.Endpoint)))
-			}
-		}
 	}
-	for _, arn := range topics {
+	var limit error
+	if len(topics) > maxTopics {
+		topics, limit = topics[:maxTopics], errLimit("topics", maxTopics)
+	}
+	type read struct {
+		fact    facts.Fact
+		targets []string
+		err     error
+		gone    bool
+	}
+	reads := make([]read, len(topics))
+	parallel(len(topics), func(i int) {
+		arn, r := topics[i], &reads[i]
 		name := arn[strings.LastIndex(arn, ":")+1:]
 		f := s.fact(arn, "aws.sns.topic", name)
 		f.Attributes["fifo"] = strings.HasSuffix(name, ".fifo")
-		if serr == nil {
-			t := byTopic[arn]
-			if t == nil {
-				t = &subs{}
+		defer func() { r.fact = f }()
+		var protocols, targets []string
+		count := 0
+		var token *string
+		for page := 0; ; page++ {
+			if page == maxSubscriptionPage {
+				f.Attributes["unread"] = []string{fmt.Sprintf("subscriptions (more than %d)", maxSubscriptionPage*100)}
+				return
 			}
-			f.Attributes["subscription_protocols"] = facts.SortedStrings(t.protocols)
-			f.Attributes["subscription_count"] = t.count
-			for _, target := range facts.SortedStrings(t.targets) {
-				s.routesToARN(f.ID, target)
+			out, e := s.c.SNS.ListSubscriptionsByTopic(s.ctx, &sns.ListSubscriptionsByTopicInput{TopicArn: aws.String(arn), NextToken: token})
+			if gone(e) {
+				r.gone = true
+				return
+			}
+			if e != nil {
+				r.err = unread(&f, "subscriptions", e)
+				return
+			}
+			for _, sub := range out.Subscriptions {
+				protocol := aws.ToString(sub.Protocol)
+				count++
+				protocols = append(protocols, protocol)
+				if arnProtocols[protocol] {
+					targets = append(targets, lambdaARN(aws.ToString(sub.Endpoint)))
+				}
+			}
+			if token = out.NextToken; aws.ToString(token) == "" {
+				break
 			}
 		}
-		s.add(f)
+		f.Attributes["subscription_protocols"] = facts.SortedStrings(protocols)
+		f.Volatile = map[string]any{"subscription_count": count}
+		r.targets = facts.SortedStrings(targets)
+	})
+	var serr error
+	for _, r := range reads {
+		if r.gone {
+			continue
+		}
+		s.add(r.fact)
+		for _, t := range r.targets {
+			s.routesToARN(r.fact.ID, t)
+		}
+		serr = firstErr(serr, r.err)
 	}
-	s.coverParts("aws.sns.topic", err, serr, "subscriptions")
+	s.coverLimit("aws.sns.topic", err, serr, limit, "subscriptions")
 }
 
 // ---- Lambda event sources ----
+
+// EventSourceCoverage is the coverage kind of Lambda event source mappings,
+// and the producer of the relationships read from them.
+const EventSourceCoverage = "aws.lambda.event_source_mapping"
 
 // collectEventSources links a queue or a table (through its stream) to the
 // function it triggers. Mappings are not facts; what was read of them is
@@ -180,9 +230,13 @@ func (s *scan) collectEventSources() {
 				source = source[:i]
 			}
 			if source != "" && fn != "" {
-				s.edge(facts.EdgeRoutesTo, facts.AWSID(source), facts.AWSID(fn))
+				// The relationship names the listing it was read from, so
+				// that a scan in which that listing fails keeps it
+				// (facts.CarryForward).
+				s.res.Edges = append(s.res.Edges, facts.NewEdge(facts.EdgeRoutesTo, facts.AWSID(source), facts.AWSID(fn),
+					facts.Derivation{Type: facts.Observed, Producer: EventSourceCoverage}, nil))
 			}
 		}
 	}
-	s.cover("aws.lambda.event_source_mapping", err)
+	s.cover(EventSourceCoverage, err)
 }

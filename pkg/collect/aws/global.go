@@ -2,6 +2,7 @@ package aws
 
 import (
 	"encoding/json"
+	"errors"
 	"net/url"
 	"sort"
 	"strings"
@@ -68,25 +69,37 @@ func (s *scan) collectS3() {
 			break
 		}
 		buckets = append(buckets, out.Buckets...)
+		if len(buckets) > maxBuckets {
+			break
+		}
+	}
+	var limit error
+	if len(buckets) > maxBuckets {
+		buckets, limit = buckets[:maxBuckets], errLimit("buckets", maxBuckets)
 	}
 
-	// The account's own block overrides what a bucket allows.
-	var account []string
-	accountRead := false
-	var perr error
-	if s.g.S3Control != nil && len(buckets) > 0 {
+	// The account's own block overrides what a bucket allows. It is one
+	// fact of its own, so that changing it is one change. Its coverage is
+	// its own too: a role that may not read it leaves buckets complete.
+	if s.g.S3Control != nil && err == nil {
 		out, e := s.g.S3Control.GetPublicAccessBlock(s.ctx, &s3control.GetPublicAccessBlockInput{AccountId: aws.String(s.acct.ID)})
+		settings, read := []string{}, false
 		switch {
 		case e == nil && out.PublicAccessBlockConfiguration != nil:
 			c := out.PublicAccessBlockConfiguration
-			account = blockSettings(c.BlockPublicAcls, c.IgnorePublicAcls, c.BlockPublicPolicy, c.RestrictPublicBuckets)
-			accountRead = true
+			settings, read = blockSettings(c.BlockPublicAcls, c.IgnorePublicAcls, c.BlockPublicPolicy, c.RestrictPublicBuckets), true
 		case e == nil, errorCode(e) == "NoSuchPublicAccessBlockConfiguration":
-			accountRead = true // none is set
-		default:
-			perr = e
+			read, e = true, nil // none is set
 		}
+		if read {
+			f := facts.NewObserved(AccountBlockID(s.acct.ID), "aws.s3.account_public_access_block", "account public access block", s.source(),
+				facts.SourceRef{Type: facts.RefARN, Value: "arn:" + s.acct.Partition + ":s3:::account-public-access-block/" + s.acct.ID}, s.now)
+			f.Attributes["settings"] = settings
+			s.add(f)
+		}
+		s.cover("aws.s3.account_public_access_block", e)
 	}
+	var perr error
 
 	// A bucket takes three calls, to its own region. They run a few at a
 	// time; facts and relationships are added afterwards, in listing order,
@@ -95,6 +108,7 @@ func (s *scan) collectS3() {
 		fact    facts.Fact
 		targets []string
 		err     error
+		gone    bool // deleted after it was listed
 	}
 	reads := make([]read, len(buckets))
 	parallel(len(buckets), func(i int) {
@@ -105,17 +119,18 @@ func (s *scan) collectS3() {
 		region := aws.ToString(b.BucketRegion)
 		if region == "" {
 			out, e := s.g.S3.GetBucketLocation(s.ctx, &s3.GetBucketLocationInput{Bucket: b.Name})
+			if gone(e) {
+				r.gone = true
+				return
+			}
 			if e != nil {
 				// Without its region a bucket cannot be asked anything.
-				r.err = e
+				r.err = unread(&f, "region", e)
 				return
 			}
 			region = bucketRegion(string(out.LocationConstraint))
 		}
 		f.Attributes["region"] = region
-		if accountRead {
-			f.Attributes["account_public_access_block"] = account
-		}
 		in := func(o *s3.Options) { o.Region = region }
 
 		pab, e := s.g.S3.GetPublicAccessBlock(s.ctx, &s3.GetPublicAccessBlockInput{Bucket: b.Name}, in)
@@ -125,8 +140,11 @@ func (s *scan) collectS3() {
 			f.Attributes["public_access_block"] = blockSettings(c.BlockPublicAcls, c.IgnorePublicAcls, c.BlockPublicPolicy, c.RestrictPublicBuckets)
 		case e == nil, errorCode(e) == "NoSuchPublicAccessBlockConfiguration":
 			f.Attributes["public_access_block"] = []string{}
+		case gone(e):
+			r.gone = true
+			return
 		default:
-			r.err = firstErr(r.err, e)
+			r.err = firstErr(r.err, unread(&f, "public_access_block", e))
 		}
 
 		st, e := s.g.S3.GetBucketPolicyStatus(s.ctx, &s3.GetBucketPolicyStatusInput{Bucket: b.Name}, in)
@@ -135,14 +153,21 @@ func (s *scan) collectS3() {
 			f.Attributes["policy_public"] = st.PolicyStatus != nil && aws.ToBool(st.PolicyStatus.IsPublic)
 		case errorCode(e) == "NoSuchBucketPolicy":
 			f.Attributes["policy_public"] = false
+		case gone(e):
+			r.gone = true
+			return
 		default:
-			r.err = firstErr(r.err, e)
+			r.err = firstErr(r.err, unread(&f, "policy_status", e))
 		}
 
 		// What the bucket notifies. Event types and key filters are not kept.
 		n, e := s.g.S3.GetBucketNotificationConfiguration(s.ctx, &s3.GetBucketNotificationConfigurationInput{Bucket: b.Name}, in)
+		if gone(e) {
+			r.gone = true
+			return
+		}
 		if e != nil {
-			r.err = firstErr(r.err, e)
+			r.err = firstErr(r.err, unread(&f, "notifications", e))
 			return
 		}
 		for _, t := range n.TopicConfigurations {
@@ -156,13 +181,22 @@ func (s *scan) collectS3() {
 		}
 	})
 	for _, r := range reads {
+		if r.gone {
+			continue
+		}
 		s.add(r.fact)
 		for _, t := range r.targets {
 			s.routesToARN(r.fact.ID, t)
 		}
 		perr = firstErr(perr, r.err)
 	}
-	s.coverParts("aws.s3.bucket", err, perr, "bucket settings")
+	s.coverLimit("aws.s3.bucket", err, perr, limit, "bucket settings")
+}
+
+// AccountBlockID is the ID of the fact that holds an account's S3 public
+// access block.
+func AccountBlockID(account string) string {
+	return facts.AWSSyntheticID("s3", "", account, "account-public-access-block", account)
 }
 
 // blockSettings names the public access block settings that are on, sorted.
@@ -311,7 +345,7 @@ func (s *scan) collectRoute53() {
 		}
 		zones = append(zones, out.HostedZones...)
 	}
-	var rerr error
+	var rerr, rlimit error
 	for _, z := range zones {
 		id := strings.TrimPrefix(aws.ToString(z.Id), "/hostedzone/")
 		arn := "arn:" + s.acct.Partition + ":route53:::hostedzone/" + id
@@ -320,16 +354,36 @@ func (s *scan) collectRoute53() {
 		f.Attributes["private"] = z.Config != nil && z.Config.PrivateZone
 		f.Attributes["zone_id"] = id
 		f.Volatile = map[string]any{"record_set_count": aws.ToInt64(z.ResourceRecordSetCount)}
+		// A zone an AWS service keeps (Cloud Map, for ECS service
+		// discovery) holds a record per running task: they change on every
+		// deploy and say nothing the services themselves do not. The zone
+		// is kept, with who manages it; its records are not read.
+		if l := z.LinkedService; l != nil && aws.ToString(l.ServicePrincipal) != "" {
+			f.Attributes["managed_by"] = aws.ToString(l.ServicePrincipal)
+			s.add(f)
+			continue
+		}
 		s.add(f)
-		if e := s.collectRecords(f.ID, arn, name, z.Id); e != nil {
+		switch e := s.collectRecords(f.ID, arn, name, z.Id); {
+		case gone(e):
+		case errors.Is(e, errRecordLimit):
+			rlimit = errLimit("record sets of a hosted zone", maxRecordSets)
+		case e != nil:
 			rerr = e
 		}
 	}
 	s.cover("aws.route53.hosted_zone", err)
+	if err == nil && rerr == nil && rlimit != nil {
+		s.res.Coverage = append(s.res.Coverage, facts.Coverage{Connector: "aws", Scope: s.acct.ID, Kind: "aws.route53.record", Status: facts.CoveragePartial, Detail: rlimit.Error()})
+		return
+	}
 	s.coverChild("aws.route53.record", "aws.route53.hosted_zone", err, rerr)
 }
 
-// collectRecords makes one fact per name and type of a zone.
+var errRecordLimit = errors.New("record set limit")
+
+// collectRecords makes one fact per name and type of a zone. Past
+// maxRecordSets it keeps what it read and returns errRecordLimit.
 func (s *scan) collectRecords(zoneFact, zoneARN, zone string, zoneID *string) error {
 	type key struct{ name, typ string }
 	type record struct {
@@ -341,11 +395,17 @@ func (s *scan) collectRecords(zoneFact, zoneARN, zone string, zoneID *string) er
 	}
 	records := map[key]*record{}
 	var keys []key
+	sets := 0
+	var limited error
 	p := route53.NewListResourceRecordSetsPaginator(s.g.Route53, &route53.ListResourceRecordSetsInput{HostedZoneId: zoneID})
 	for p.HasMorePages() {
 		out, err := p.NextPage(s.ctx)
 		if err != nil {
 			return err
+		}
+		if sets += len(out.ResourceRecordSets); sets > maxRecordSets {
+			limited = errRecordLimit
+			break
 		}
 		for _, set := range out.ResourceRecordSets {
 			k := key{dnsName(aws.ToString(set.Name)), string(set.Type)}
@@ -385,7 +445,7 @@ func (s *scan) collectRecords(zoneFact, zoneARN, zone string, zoneID *string) er
 		s.add(f)
 		s.edge(facts.EdgeContains, zoneFact, f.ID)
 	}
-	return nil
+	return limited
 }
 
 // dnsName writes a name as people do: lower case, no trailing dot, and "*"
@@ -438,12 +498,20 @@ func (s *scan) collectIAMRoles() {
 				roles = append(roles, r)
 			}
 		}
+		if len(roles) > maxRoles {
+			break
+		}
+	}
+	var limit error
+	if len(roles) > maxRoles {
+		roles, limit = roles[:maxRoles], errLimit("roles", maxRoles)
 	}
 	// Two calls per role, a few roles at a time; facts are added in listing
 	// order.
 	type read struct {
 		fact facts.Fact
 		err  error
+		gone bool
 	}
 	reads := make([]read, len(roles))
 	parallel(len(roles), func(i int) {
@@ -454,6 +522,7 @@ func (s *scan) collectIAMRoles() {
 		f.Attributes["trusted_services"] = t.services
 		f.Attributes["trusted_accounts"] = t.accounts
 		f.Attributes["trusted_federated"] = t.federated
+		f.Attributes["trust_flags"] = t.flags
 		f.Attributes["trusts_anyone"] = t.anyone
 
 		var attached []string
@@ -471,7 +540,11 @@ func (s *scan) collectIAMRoles() {
 		if e == nil {
 			f.Attributes["attached_policies"] = facts.SortedStrings(attached)
 		}
-		reads[i].err = e
+		if gone(e) {
+			reads[i].gone = true
+			return
+		}
+		reads[i].err = unread(&f, "attached_policies", e)
 
 		var inline []string
 		ip := iam.NewListRolePoliciesPaginator(s.g.IAM, &iam.ListRolePoliciesInput{RoleName: r.RoleName})
@@ -486,29 +559,45 @@ func (s *scan) collectIAMRoles() {
 		if e == nil {
 			f.Attributes["inline_policy_names"] = facts.SortedStrings(inline)
 		}
-		reads[i].err = firstErr(reads[i].err, e)
+		if gone(e) {
+			reads[i].gone = true
+			return
+		}
+		reads[i].err = firstErr(reads[i].err, unread(&f, "inline_policy_names", e))
 		reads[i].fact = f
 	})
 	for _, r := range reads {
+		if r.gone {
+			continue
+		}
 		s.add(r.fact)
 		perr = firstErr(perr, r.err)
 	}
-	s.coverParts("aws.iam.role", err, perr, "attached policies")
+	s.coverLimit("aws.iam.role", err, perr, limit, "attached policies")
 }
 
 // trust is who a role's trust policy lets assume it.
 type trust struct {
+	// accounts holds account IDs only (and, as AWS returns it, the ID of a
+	// principal that was deleted).
 	services, accounts, federated []string
-	// anyone: a statement allows every principal and sets no condition.
+	// flags: "anyone", "anyone_with_conditions", "not_principal",
+	// "not_principal_with_conditions", "federated_without_conditions".
+	flags []string
+	// anyone: a statement lets every principal in, or all but the ones it
+	// names, and sets no condition.
 	anyone bool
 }
 
 // trustOf reads the principals out of a trust policy document as IAM
 // returns it (URL-encoded JSON). Only Allow statements count. A principal
-// in an account is reduced to the account's ID; "*" stays "*", with
-// " (with conditions)" when its statement has a Condition.
+// in an account is reduced to the account's ID. What a list of principals
+// cannot say is said in flags: a statement that allows "*", one that
+// allows everyone except named principals (NotPrincipal), and one that
+// trusts an identity provider, each with or without a Condition. The
+// conditions themselves are not kept.
 func trustOf(document string) trust {
-	t := trust{services: []string{}, accounts: []string{}, federated: []string{}}
+	t := trust{services: []string{}, accounts: []string{}, federated: []string{}, flags: []string{}}
 	if decoded, err := url.QueryUnescape(document); err == nil {
 		document = decoded
 	}
@@ -519,9 +608,10 @@ func trustOf(document string) trust {
 		return t
 	}
 	type statement struct {
-		Effect    string
-		Principal json.RawMessage
-		Condition json.RawMessage
+		Effect       string
+		Principal    json.RawMessage
+		NotPrincipal json.RawMessage
+		Condition    json.RawMessage
 	}
 	var statements []statement
 	if json.Unmarshal(doc.Statement, &statements) != nil {
@@ -536,18 +626,21 @@ func trustOf(document string) trust {
 			continue
 		}
 		conditional := len(st.Condition) > 0 && string(st.Condition) != "null" && string(st.Condition) != "{}"
-		everyone := func() {
+		flag := func(name string) {
 			if conditional {
-				t.accounts = append(t.accounts, "* (with conditions)")
+				t.flags = append(t.flags, name+"_with_conditions")
 				return
 			}
-			t.accounts = append(t.accounts, "*")
+			t.flags = append(t.flags, name)
 			t.anyone = true
+		}
+		if len(st.NotPrincipal) > 0 && string(st.NotPrincipal) != "null" {
+			flag("not_principal")
 		}
 		var all string
 		if json.Unmarshal(st.Principal, &all) == nil {
 			if all == "*" {
-				everyone()
+				flag("anyone")
 			}
 			continue
 		}
@@ -574,10 +667,13 @@ func trustOf(document string) trust {
 						v = v[i+1:]
 					}
 					t.federated = append(t.federated, v)
+					if !conditional {
+						t.flags = append(t.flags, "federated_without_conditions")
+					}
 				case "AWS":
 					switch parts := strings.Split(v, ":"); {
 					case v == "*":
-						everyone()
+						flag("anyone")
 					case strings.HasPrefix(v, "arn:") && len(parts) > 4:
 						t.accounts = append(t.accounts, parts[4])
 					default:
@@ -587,6 +683,6 @@ func trustOf(document string) trust {
 			}
 		}
 	}
-	t.services, t.accounts, t.federated = facts.SortedStrings(t.services), facts.SortedStrings(t.accounts), facts.SortedStrings(t.federated)
+	t.services, t.accounts, t.federated, t.flags = facts.SortedStrings(t.services), facts.SortedStrings(t.accounts), facts.SortedStrings(t.federated), facts.SortedStrings(t.flags)
 	return t
 }

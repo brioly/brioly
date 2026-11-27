@@ -376,14 +376,13 @@ func (fakeSNS) ListTopics(context.Context, *sns.ListTopicsInput, ...func(*sns.Op
 	return &sns.ListTopicsOutput{Topics: []snstypes.Topic{{TopicArn: aws.String(topicARN)}}}, nil
 }
 
-func (fakeSNS) ListSubscriptions(context.Context, *sns.ListSubscriptionsInput, ...func(*sns.Options)) (*sns.ListSubscriptionsOutput, error) {
+func (fakeSNS) ListSubscriptionsByTopic(_ context.Context, in *sns.ListSubscriptionsByTopicInput, _ ...func(*sns.Options)) (*sns.ListSubscriptionsByTopicOutput, error) {
 	sub := func(protocol, endpoint string) snstypes.Subscription {
-		return snstypes.Subscription{TopicArn: aws.String(topicARN), Protocol: aws.String(protocol), Endpoint: aws.String(endpoint)}
+		return snstypes.Subscription{TopicArn: in.TopicArn, Protocol: aws.String(protocol), Endpoint: aws.String(endpoint)}
 	}
-	return &sns.ListSubscriptionsOutput{Subscriptions: []snstypes.Subscription{
+	return &sns.ListSubscriptionsByTopicOutput{Subscriptions: []snstypes.Subscription{
 		sub("sqs", queueARN), sub("lambda", fnARN), sub("email", "ops@example.com"), sub("sms", "+15555550100"),
 		sub("https", "https://hooks.example.com/in?key=hook-token"),
-		{TopicArn: aws.String("arn:aws:sns:ap-northeast-2:999988887777:theirs"), Protocol: aws.String("sqs"), Endpoint: aws.String(queueARN)},
 	}}, nil
 }
 
@@ -487,7 +486,9 @@ func TestMoreServices(t *testing.T) {
 	// account's block; a bucket without a region in the listing is asked.
 	check(bucketARN, "region", "ap-northeast-2")
 	check(bucketARN, "public_access_block", "[BlockPublicAcls IgnorePublicAcls]")
-	check(bucketARN, "account_public_access_block", "[BlockPublicAcls]")
+	if got := fmt.Sprint(fs[AccountBlockID(acct)].Attributes["settings"]); got != "[BlockPublicAcls]" {
+		t.Errorf("account public access block = %s", got)
+	}
 	check(bucketARN, "policy_public", "true")
 	check("arn:aws:s3:::acme-old", "region", "us-east-1")
 	check("arn:aws:s3:::acme-old", "public_access_block", "[]")
@@ -528,6 +529,7 @@ func TestMoreServices(t *testing.T) {
 	check(roleARN, "trusted_accounts", "[999988887777]")
 	check(roleARN, "trusted_federated", "[oidc-provider/token.actions.githubusercontent.com]")
 	check(roleARN, "trusts_anyone", "false")
+	check(roleARN, "trust_flags", "[federated_without_conditions]")
 	check(roleARN, "attached_policies", "[arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]")
 	check(roleARN, "inline_policy_names", "[read-bucket]")
 	for fid, f := range fs {
@@ -556,7 +558,9 @@ func TestMoreServices(t *testing.T) {
 	check(queueARN, "max_receive_count", "5")
 	check(queueARN, "encryption", "sse-sqs")
 	check(topicARN, "subscription_protocols", "[email https lambda sms sqs]")
-	check(topicARN, "subscription_count", "5")
+	if fs[id(topicARN)].Volatile["subscription_count"] != 5 {
+		t.Errorf("subscription count = %v, want it volatile", fs[id(topicARN)].Volatile)
+	}
 	check(tableARN, "key_schema", "[id:HASH created:RANGE]")
 	check(tableARN, "billing_mode", "PAY_PER_REQUEST")
 	check(tableARN, "stream", "NEW_IMAGE")
@@ -592,11 +596,6 @@ func TestMoreServices(t *testing.T) {
 	} {
 		if !es[want] {
 			t.Errorf("missing edge %s", want)
-		}
-	}
-	for e := range es {
-		if strings.Contains(e, "999988887777:theirs") {
-			t.Error("a subscription to another account's topic made an edge from a topic that was not read")
 		}
 	}
 }
@@ -680,9 +679,6 @@ func (deniedAll) ListQueues(context.Context, *sqs.ListQueuesInput, ...func(*sqs.
 func (deniedAll) ListTopics(context.Context, *sns.ListTopicsInput, ...func(*sns.Options)) (*sns.ListTopicsOutput, error) {
 	return nil, &smithy.GenericAPIError{Code: "AuthorizationError"}
 }
-func (deniedAll) ListSubscriptions(context.Context, *sns.ListSubscriptionsInput, ...func(*sns.Options)) (*sns.ListSubscriptionsOutput, error) {
-	return nil, &smithy.GenericAPIError{Code: "AuthorizationError"}
-}
 func (deniedAll) ListTables(context.Context, *dynamodb.ListTablesInput, ...func(*dynamodb.Options)) (*dynamodb.ListTablesOutput, error) {
 	return nil, &smithy.GenericAPIError{Code: "AccessDeniedException"}
 }
@@ -726,7 +722,7 @@ func TestARoleWithoutTheNewPermissions(t *testing.T) {
 	for kind, want := range map[string]string{
 		"aws.apigateway.api": facts.CoverageDenied, "aws.sqs.queue": facts.CoverageDenied, "aws.sns.topic": facts.CoverageDenied,
 		"aws.dynamodb.table": facts.CoverageDenied, "aws.elasticache.cache": facts.CoverageDenied, "aws.lambda.event_source_mapping": facts.CoverageDenied,
-		"aws.s3.bucket": facts.CoverageDenied, "aws.cloudfront.distribution": facts.CoverageDenied, "aws.route53.hosted_zone": facts.CoverageDenied,
+		"aws.s3.bucket": facts.CoverageDenied, "aws.s3.account_public_access_block": "", "aws.cloudfront.distribution": facts.CoverageDenied, "aws.route53.hosted_zone": facts.CoverageDenied,
 		"aws.route53.record": facts.CoverageSkipped, "aws.iam.role": facts.CoverageDenied,
 		"aws.ecs.service": facts.CoverageComplete, "aws.rds.cluster": facts.CoverageComplete, "aws.elbv2.load_balancer": facts.CoverageComplete,
 	} {
@@ -735,3 +731,5 @@ func TestARoleWithoutTheNewPermissions(t *testing.T) {
 		}
 	}
 }
+
+func init() { restResourcesPause = 0 }

@@ -110,7 +110,7 @@ func TestMoreServicesInComponentsAndDocuments(t *testing.T) {
 			"### S3 buckets", "| acme-assets | ap-northeast-2 | CloudFront distribution **assets.acme.com** | Lambda function **resize**, topic **events** |",
 			"## Messaging", "| jobs | standard | sse-sqs | jobs-dlq after 5 receives | topic **events** | Lambda function **resize** |",
 			"| events | email, https, lambda, sms, sqs | S3 bucket **acme-assets** |",
-			"## IAM roles", "| resize-role | Lambda function **resize** | `edgelambda.amazonaws.com`, `lambda.amazonaws.com` | account `999988887777`, `oidc-provider/token.actions.githubusercontent.com` |",
+			"## IAM roles", "| resize-role | Lambda function **resize** | `edgelambda.amazonaws.com`, `lambda.amazonaws.com` | an identity provider without any condition on who signs in, account `999988887777`, identity provider `oidc-provider/token.actions.githubusercontent.com` |",
 			"**resize** uses **sessions** (aws.elasticache.cache)",
 		},
 		stack: {"| CloudFront | 1 |", "| S3 | 2 |", "| DynamoDB | 1 |", "| ElastiCache | 3 |", "- Cache engines: memcached 1.6.22, redis 7.1.0, valkey 8.0"},

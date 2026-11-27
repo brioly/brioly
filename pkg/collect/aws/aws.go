@@ -140,7 +140,7 @@ type SQSAPI interface {
 // SNSAPI is the subset of the SNS client used by the collector.
 type SNSAPI interface {
 	ListTopics(context.Context, *sns.ListTopicsInput, ...func(*sns.Options)) (*sns.ListTopicsOutput, error)
-	ListSubscriptions(context.Context, *sns.ListSubscriptionsInput, ...func(*sns.Options)) (*sns.ListSubscriptionsOutput, error)
+	ListSubscriptionsByTopic(context.Context, *sns.ListSubscriptionsByTopicInput, ...func(*sns.Options)) (*sns.ListSubscriptionsByTopicOutput, error)
 }
 
 // DynamoDBAPI is the subset of the DynamoDB client used by the collector. No
@@ -277,7 +277,10 @@ func Collect(ctx context.Context, opts Options) (collect.Result, error) {
 			RDS:    rds.NewFromConfig(rcfg),
 			Lambda: lambda.NewFromConfig(rcfg),
 
-			APIGateway:   apigateway.NewFromConfig(rcfg),
+			// GetResources is limited to five requests in two seconds for
+			// an account, whoever makes them: calls are paced (see
+			// restResourcesPause) and a refusal is retried for longer.
+			APIGateway:   apigateway.NewFromConfig(rcfg, func(o *apigateway.Options) { o.RetryMaxAttempts = 8 }),
 			APIGatewayV2: apigatewayv2.NewFromConfig(rcfg),
 			SQS:          sqs.NewFromConfig(rcfg),
 			SNS:          sns.NewFromConfig(rcfg),
@@ -487,6 +490,52 @@ func (s *scan) coverParts(kind string, listErr, partErr error, part string) {
 	s.cover(kind, listErr)
 }
 
+// Limits on what one scan reads of a listing. Beyond one, what was read is
+// kept and the kind is recorded as partial, with the limit in the detail:
+// an account with a hundred thousand of something would otherwise take
+// longer than a scan may. The order AWS lists in is not promised, so which
+// ones are read past a limit can differ between scans.
+var (
+	maxBuckets          = 1000
+	maxRoles            = 2000
+	maxRecordSets       = 20000 // per hosted zone
+	maxQueues           = 2000
+	maxTopics           = 2000
+	maxTables           = 1000
+	maxAPIs             = 300 // REST, and HTTP and WebSocket, each
+	maxSubscriptionPage = 5   // pages of 100, per topic
+)
+
+// errLimit is the "error" of a listing that stopped at its limit.
+func errLimit(what string, limit int) error {
+	return fmt.Errorf("limit: only the first %d %s are read", limit, what)
+}
+
+// goneCodes are the answers that mean "this was deleted after it was
+// listed": it is absent, and nothing failed.
+var goneCodes = map[string]bool{
+	"NoSuchBucket": true, "NoSuchEntity": true, "ResourceNotFoundException": true, "NotFoundException": true,
+	"AWS.SimpleQueueService.NonExistentQueue": true, "QueueDoesNotExist": true, "NotFound": true,
+}
+
+func gone(err error) bool { return err != nil && goneCodes[errorCode(err)] }
+
+func refused(err error) bool { return err != nil && classify(err) == facts.CoverageDenied }
+
+// unread marks on f that AWS refused part of it, for this resource alone.
+// The kind stays complete: what exists was listed, and the fact says for
+// itself what of it is not known. Any other failure of a part is returned
+// to be recorded as a partial read of the kind (and what an earlier scan
+// knew is carried forward), because it may not happen again.
+func unread(f *facts.Fact, part string, err error) error {
+	if !refused(err) {
+		return err
+	}
+	list, _ := f.Attributes["unread"].([]string)
+	f.Attributes["unread"] = facts.SortedStrings(append(list, part))
+	return nil
+}
+
 // errorCode returns the AWS error code of err, or "".
 func errorCode(err error) string {
 	var apiErr smithy.APIError
@@ -588,13 +637,21 @@ func ints32(in []int32) []int {
 	return out
 }
 
-// hostOf extracts the host name of an endpoint string.
+// hostOf extracts the host name of an endpoint string: no scheme, port,
+// path or query. An address that carries credentials
+// ("https://user:token@host/") gives "": nothing of it is kept.
 func hostOf(endpoint string) string {
-	h := strings.ToLower(endpoint)
+	h := strings.ToLower(strings.TrimSpace(endpoint))
 	if i := strings.Index(h, "://"); i >= 0 {
 		h = h[i+3:]
 	}
-	if i := strings.IndexAny(h, "/:"); i >= 0 {
+	if i := strings.IndexAny(h, "/?#"); i >= 0 {
+		h = h[:i]
+	}
+	if strings.Contains(h, "@") {
+		return ""
+	}
+	if i := strings.Index(h, ":"); i >= 0 {
 		h = h[:i]
 	}
 	return h
@@ -640,4 +697,15 @@ func (s *scan) linkDependencies() {
 		}
 	}
 	s.envValues = nil
+}
+
+// coverLimit records a kind whose listing worked but stopped at a limit or
+// whose parts failed: partial, with why. With neither it is complete.
+func (s *scan) coverLimit(kind string, listErr, partErr, limit error, part string) {
+	if listErr == nil && partErr == nil && limit != nil {
+		s.res.Coverage = append(s.res.Coverage, facts.Coverage{Connector: "aws", Scope: s.acct.ID, Region: s.region,
+			Kind: kind, Status: facts.CoveragePartial, Detail: limit.Error()})
+		return
+	}
+	s.coverParts(kind, listErr, partErr, part)
 }

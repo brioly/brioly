@@ -116,6 +116,13 @@ var Kinds = map[string]Kind{
 	},
 
 	// ---- AWS storage, delivery, DNS, APIs, messaging ----
+	// "unread" on a kind below lists what AWS refused for that one resource
+	// while the rest of its kind was read (a bucket whose own policy denies
+	// the scanner, a topic with more subscriptions than are read). The
+	// attributes those parts would have set are absent, and documents say
+	// "not read" for them. It is a property of the resource as scanned: the
+	// same refusal gives the same fact, so nothing flaps.
+	//
 	// Nothing below holds data or a policy document: no object, message or
 	// item is ever requested, and of a policy only what AWS itself derives
 	// from it (policy_public). Nothing that changes on a deploy or with use
@@ -125,10 +132,16 @@ var Kinds = map[string]Kind{
 		// settings that are on, for the bucket and for its account;
 		// policy_public is AWS's own judgment of the bucket policy
 		// (GetBucketPolicyStatus), false for a bucket without a policy.
-		// Each is absent when it could not be read.
-		Structural: []string{"region", "public_access_block", "account_public_access_block", "policy_public"},
+		// Each is absent when it could not be read. unread names the parts
+		// AWS refused for this bucket alone (its own policy can do that);
+		// see "unread" below.
+		Structural: []string{"region", "public_access_block", "policy_public", "unread"},
 		Anchor:     true,
 	},
+	// The account's own public access block, which overrides what a bucket
+	// allows. One fact per account, so that changing it is one change and
+	// not one per bucket. settings lists the ones that are on.
+	"aws.s3.account_public_access_block": {Structural: []string{"settings"}},
 	"aws.cloudfront.distribution": {
 		// origins are host names; origin_protocols how the distribution
 		// connects to them ("s3", "https-only", "http-only", "match-viewer",
@@ -140,7 +153,10 @@ var Kinds = map[string]Kind{
 		Anchor:     true,
 	},
 	"aws.route53.hosted_zone": {
-		Structural: []string{"private"},
+		// managed_by names the AWS service that owns the zone's records
+		// (Cloud Map, for service discovery). Those records follow every
+		// task that starts and stops and are not read.
+		Structural: []string{"private", "managed_by"},
 		Detail:     []string{"zone_id"},
 		Volatile:   []string{"record_set_count"},
 		Anchor:     true,
@@ -159,12 +175,12 @@ var Kinds = map[string]Kind{
 		// asks for none); integrations the kinds of what routes lead to;
 		// domains its custom domain names. Stage variables, API keys and
 		// resource policies are never kept.
-		Structural: []string{"protocol", "endpoint_type", "default_endpoint_disabled", "stages", "authorization", "integrations", "domains"},
+		Structural: []string{"protocol", "endpoint_type", "default_endpoint_disabled", "stages", "authorization", "integrations", "domains", "unread"},
 		Detail:     []string{"api_id", "endpoint", "routes", "integration_hosts", "domain_targets"},
 		Anchor:     true,
 	},
 	"aws.sqs.queue": {
-		Structural: []string{"fifo", "dead_letter_queue", "encryption"},
+		Structural: []string{"fifo", "dead_letter_queue", "encryption", "unread"},
 		Detail:     []string{"visibility_timeout_s", "retention_s", "max_receive_count"},
 		Anchor:     true,
 	},
@@ -172,12 +188,14 @@ var Kinds = map[string]Kind{
 		// Of a subscription only its protocol is kept, and where it leads
 		// when that is a queue or a function (as a relationship): never an
 		// email address, a phone number or a URL.
-		Structural: []string{"fifo", "subscription_protocols"},
-		Detail:     []string{"subscription_count"},
+		// The number of subscriptions moves with every device that
+		// registers: live state.
+		Structural: []string{"fifo", "subscription_protocols", "unread"},
+		Volatile:   []string{"subscription_count"},
 		Anchor:     true,
 	},
 	"aws.dynamodb.table": {
-		Structural: []string{"key_schema", "billing_mode", "global_secondary_indexes", "stream", "encryption", "replica_regions", "deletion_protection"},
+		Structural: []string{"key_schema", "billing_mode", "global_secondary_indexes", "stream", "encryption", "replica_regions", "deletion_protection", "unread"},
 		Detail:     []string{"table_class"},
 		Volatile:   []string{"status"},
 		Anchor:     true,
@@ -194,8 +212,14 @@ var Kinds = map[string]Kind{
 	},
 	// A role, without its policy documents: who may assume it (the
 	// principals of its trust policy) and the names of what is attached.
+	// trusted_accounts holds account IDs only. trust_flags says what the
+	// lists cannot: "anyone" (a statement allows every principal and sets no
+	// condition), "anyone_with_conditions", "not_principal" (a statement
+	// allows everyone but the principals it names) and
+	// "federated_without_conditions". trusts_anyone is true for "anyone"
+	// and for "not_principal" without conditions.
 	"aws.iam.role": {
-		Structural: []string{"path", "trusted_services", "trusted_accounts", "trusted_federated", "trusts_anyone", "attached_policies", "inline_policy_names"},
+		Structural: []string{"path", "trusted_services", "trusted_accounts", "trusted_federated", "trust_flags", "trusts_anyone", "attached_policies", "inline_policy_names", "unread"},
 	},
 
 	// ---- Code ----

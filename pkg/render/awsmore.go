@@ -14,27 +14,42 @@ import (
 // snapshot has such facts: a snapshot without them renders as it always
 // did.
 
-// moreKinds are the kinds this file is about.
-var moreKinds = map[string]bool{
-	"aws.s3.bucket": true, "aws.cloudfront.distribution": true, "aws.route53.hosted_zone": true, "aws.route53.record": true,
-	"aws.apigateway.api": true, "aws.sqs.queue": true, "aws.sns.topic": true, "aws.dynamodb.table": true,
-	"aws.elasticache.cache": true, "aws.iam.role": true,
-}
-
-// hasMore reports whether a snapshot says anything about these services: a
-// fact, or a record of having tried to read them.
-func hasMore(s *facts.Snapshot) bool {
+// scanned reports whether a snapshot can speak about a kind: it has such a
+// fact, or it read the kind in full somewhere and found none. A kind that
+// was only tried and refused is not scanned: a rule about it was applied to
+// nothing, and the documents must not say it was.
+func scanned(s *facts.Snapshot, kind string) bool {
 	for _, f := range s.Facts {
-		if moreKinds[f.Kind] {
+		if f.Kind == kind {
 			return true
 		}
 	}
 	for _, c := range s.Coverage {
-		if moreKinds[c.Kind] {
+		if c.Kind == kind && c.Status == facts.CoverageComplete {
 			return true
 		}
 	}
 	return false
+}
+
+// accountBlock returns the settings of the public access block of the
+// account a bucket is in, and whether they were read.
+func accountBlock(g *graph, bucket facts.Fact) ([]string, bool) {
+	for _, f := range g.kind("aws.s3.account_public_access_block") {
+		if f.Source.Scope == bucket.Source.Scope && f.Source.Connector == bucket.Source.Connector {
+			return listAttr(f, "settings"), true
+		}
+	}
+	return nil, false
+}
+
+// trustWords says in words what a role's trust flags mean.
+var trustWords = map[string]string{
+	"anyone":                        "**any AWS principal, without conditions**",
+	"anyone_with_conditions":        "any AWS principal that meets the policy's conditions (not read)",
+	"not_principal":                 "**everyone but the principals the policy names (NotPrincipal), without conditions**",
+	"not_principal_with_conditions": "everyone but the principals the policy names (NotPrincipal), under conditions (not read)",
+	"federated_without_conditions":  "an identity provider without any condition on who signs in",
 }
 
 // absent says how to write a value that may not have been read.
@@ -55,6 +70,9 @@ func writeAWSEdge(b *strings.Builder, g *graph) {
 				visibility = "private"
 			}
 			fmt.Fprintf(b, "### Zone %s (%s)\n\n- Source: %s\n", displayName(z), visibility, evidence(z))
+			if by := strAttr(z, "managed_by"); by != "" {
+				fmt.Fprintf(b, "- Managed by %s (service discovery): its records follow the tasks that run and are not read.\n", code(by))
+			}
 			var rows []string
 			others := map[string]int{}
 			for _, r := range g.targets(z.ID, facts.EdgeContains) {
@@ -113,11 +131,21 @@ func writeAWSEdge(b *strings.Builder, g *graph) {
 			if boolAttr(a, "default_endpoint_disabled") {
 				endpoint += " (disabled)"
 			}
-			fmt.Fprintf(b, "- Default endpoint: %s; custom domains: %s\n", endpoint, orNone(codeEach(listAttr(a, "domains"))))
-			fmt.Fprintf(b, "- Stages: %s\n", orNone(codeEach(listAttr(a, "stages"))))
+			domains := "not read"
+			if known(a, "domains") {
+				domains = orNone(codeEach(listAttr(a, "domains")))
+			}
+			fmt.Fprintf(b, "- Default endpoint: %s; custom domains: %s\n", endpoint, domains)
+			if known(a, "stages") {
+				fmt.Fprintf(b, "- Stages: %s\n", orNone(codeEach(listAttr(a, "stages"))))
+			} else {
+				b.WriteString("- Stages: not read\n")
+			}
 			routes := listAttr(a, "routes")
 			if known(a, "routes") {
 				fmt.Fprintf(b, "- Routes: %d; authorization at the gateway: %s\n", len(routes), orNone(listAttr(a, "authorization")))
+			} else {
+				b.WriteString("- Routes: not read\n")
 			}
 			if in := listAttr(a, "integrations"); len(in) > 0 {
 				fmt.Fprintf(b, "- Integrations: %s\n", strings.Join(in, ", "))
@@ -245,12 +273,19 @@ func writeRoles(b *strings.Builder, g *graph) {
 			users = append(users, cloudflareTarget(u))
 		}
 		var outside []string
+		for _, flag := range listAttr(r, "trust_flags") {
+			if w := trustWords[flag]; w != "" {
+				outside = append(outside, w)
+			}
+		}
 		for _, a := range listAttr(r, "trusted_accounts") {
 			if a != r.Source.Scope {
 				outside = append(outside, "account "+code(a))
 			}
 		}
-		outside = append(outside, codeEach(listAttr(r, "trusted_federated"))...)
+		for _, p := range listAttr(r, "trusted_federated") {
+			outside = append(outside, "identity provider "+code(p))
+		}
 		if len(users)+len(outside) == 0 {
 			rest++
 			continue
@@ -281,23 +316,18 @@ func writeRoles(b *strings.Builder, g *graph) {
 
 // bucketPublic judges a bucket by what AWS itself reports. public: AWS
 // calls the bucket policy public and no RestrictPublicBuckets setting, of
-// the bucket or of the account, overrides that. sure is false when one of
-// those could not be read.
-func bucketPublic(raw facts.Fact) (public, sure bool) {
+// the bucket or of its account (account, accountRead), overrides that.
+// sure is false when one of those could not be read.
+func bucketPublic(raw facts.Fact, account []string, accountRead bool) (public, sure bool) {
 	policy, ok := raw.Attributes["policy_public"].(bool)
 	if !ok || !policy {
 		return false, ok
 	}
-	sure = true
-	for _, key := range []string{"public_access_block", "account_public_access_block"} {
-		if _, read := raw.Attributes[key]; !read {
-			sure = false
-		}
-		if contains(listAttr(raw, key), "RestrictPublicBuckets") {
-			return false, true
-		}
+	_, ownRead := raw.Attributes["public_access_block"]
+	if contains(listAttr(raw, "public_access_block"), "RestrictPublicBuckets") || contains(account, "RestrictPublicBuckets") {
+		return false, true
 	}
-	return true, sure
+	return true, ownRead && accountRead
 }
 
 // moreExposure adds CloudFront, API Gateway and S3 to the exposure review.
@@ -342,7 +372,8 @@ func moreExposure(g *graph, rawByID map[string]facts.Fact, add func(level, what 
 	}
 	for _, b := range g.kind("aws.s3.bucket") {
 		raw := rawByID[b.ID]
-		public, sure := bucketPublic(raw)
+		account, accountRead := accountBlock(g, b)
+		public, sure := bucketPublic(raw, account, accountRead)
 		verdict := "no"
 		switch {
 		case public && sure:
@@ -366,9 +397,25 @@ func moreExposure(g *graph, rawByID map[string]facts.Fact, add func(level, what 
 		if v, ok := raw.Attributes["policy_public"].(bool); ok {
 			policy = yesNo(v)
 		}
-		fmt.Fprintf(&bk, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(displayName(b)), policy, cell("public_access_block"), cell("account_public_access_block"), verdict, evidence(b))
+		accountCell := "not read"
+		if accountRead {
+			accountCell = orNone(account)
+		}
+		fmt.Fprintf(&bk, "| %s | %s | %s | %s | %s | %s |\n", mdEscape(displayName(b)), policy, cell("public_access_block"), accountCell, verdict, evidence(b))
 		if public {
 			fmt.Fprintf(&r, "- S3 bucket **%s**: its bucket policy is public — %s\n", displayName(b), evidence(b))
+		}
+	}
+	// A role anyone may assume is reachable from every AWS account.
+	for _, role := range g.kind("aws.iam.role") {
+		flags := listAttr(rawByID[role.ID], "trust_flags")
+		switch {
+		case contains(flags, "anyone") || contains(flags, "not_principal"):
+			add(levelHigh, "IAM role can be assumed by any AWS principal: its trust policy allows everyone and sets no condition", role)
+			fmt.Fprintf(&r, "- IAM role **%s** can be assumed from any AWS account — %s\n", displayName(role), evidence(role))
+			reach(role, "Role anyone may assume")
+		case contains(flags, "federated_without_conditions"):
+			add(levelMedium, "IAM role trusts an identity provider without any condition on who signs in", role)
 		}
 	}
 	return r.String(), bk.String()
