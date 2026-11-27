@@ -110,3 +110,41 @@ func TestCarryForwardKeepsWhatCouldNotBeRead(t *testing.T) {
 		t.Error("facts were carried across baselines")
 	}
 }
+
+// "unread" says what this scan was refused for one resource. A resource
+// this scan read gives its own word on that, so an old mark is not put
+// back on it; a resource this scan did not read is carried whole, and its
+// mark is still the truth about the values carried with it.
+func TestCarryForwardAndUnread(t *testing.T) {
+	src := Source{Connector: "aws", Scope: "1"}
+	mk := func(name string, attrs map[string]any) Fact {
+		f := NewObserved("aws:"+name, "aws.s3.bucket", name, src, SourceRef{Type: RefARN, Value: name}, time.Unix(0, 0))
+		f.Attributes = attrs
+		return f
+	}
+	snap := func(status string, fs ...Fact) *Snapshot {
+		s := &Snapshot{Facts: fs, Coverage: []Coverage{{Connector: "aws", Scope: "1", Kind: "aws.s3.bucket", Status: status}}}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	prev := snap(CoverageComplete,
+		mk("x", map[string]any{"region": "r", "unread": []string{"policy_status"}}),
+		mk("y", map[string]any{"region": "r", "unread": []string{"policy_status"}}))
+	// This scan reads x in full (it is no longer refused) and does not see
+	// y at all; the kind is partial for another reason.
+	now := snap(CoveragePartial, mk("x", map[string]any{"region": "r", "policy_public": false}))
+	now.CarryForward(prev)
+	if err := now.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	x, _ := now.FactByID("aws:x")
+	if _, marked := x.Attributes["unread"]; marked || x.Stale != "" {
+		t.Errorf("x was read in full and carries an old mark: %+v (stale %q)", x.Attributes, x.Stale)
+	}
+	y, ok := now.FactByID("aws:y")
+	if got, _ := y.Attributes["unread"].([]string); !ok || len(got) != 1 || y.Stale != StaleNotRead {
+		t.Errorf("y was not read and is carried whole, mark included: %+v (stale %q)", y.Attributes, y.Stale)
+	}
+}

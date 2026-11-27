@@ -86,6 +86,14 @@ const RegistryVersion = 1 // 분류가 바뀌면 올림 (5절 재기준)
 | `aws.ecs.task_definition` | 컨테이너 이름·image_repository·포트, network_mode | cpu, memory, env_keys, secret_keys |
 | `aws.lambda.function` | runtime, package_type, VPC 설정 | handler, memory_mb, timeout_s, architectures, env_keys |
 | `aws.rds.*` | 1.3절 참조. 단, 클러스터의 `multi_az`는 detail (`RegistryVersion` 2) | |
+| `aws.s3.bucket` / `aws.s3.account_public_access_block` | region, 버킷의 public access block에서 켜진 설정, `policy_public`(AWS가 판단한 값), `unread` / 계정의 설정(계정에 사실 하나) | |
+| `aws.cloudfront.distribution` | aliases, origin 호스트, origin·viewer 프로토콜, enabled, web ACL 유무, 최소 TLS | domain_name, distribution_id, price_class |
+| `aws.route53.hosted_zone` / `record` | private 여부, `managed_by` / zone, type, alias, routing, targets(A·AAAA·CNAME·MX·NS와 alias만) | zone_id / ttl, record_count |
+| `aws.apigateway.api` | protocol, endpoint_type, 기본 endpoint 비활성 여부, stage 이름, authorization 종류, integration 종류, custom domain | api_id, endpoint, routes, integration_hosts, domain_targets |
+| `aws.sqs.queue` / `aws.sns.topic` | fifo, DLQ 이름, 암호화 종류 / fifo, 구독 프로토콜 집합 | timeout·보존 기간·max_receive_count / (구독 수는 volatile) |
+| `aws.dynamodb.table` | key schema, billing mode, GSI 이름, stream, 암호화, replica 리전, deletion protection | table_class |
+| `aws.elasticache.cache` | deployment(replication_group·cluster·serverless), engine, engine_major, 암호화·failover·AUTH token 여부, SG | engine_version, node_type, endpoint |
+| `aws.iam.role` | path, trust policy의 principal(서비스·계정·federated), `trust_flags`, `trusts_anyone`, 붙은 정책의 ARN·inline 정책 이름 | |
 | `code.repository` | primary_language | 언어 비율 |
 | `code.dependency` (dev 제외) | ecosystem, major | version_constraint |
 | `code.dependency` (dev) | | 전부 detail |
@@ -124,7 +132,9 @@ type Component struct {
 |---|---|---|
 | `aws.ecs.service`, `aws.lambda.function`, `aws.autoscaling.group`, 단독 `aws.ec2.instance`, `k8s.workload` | 워크로드 | `workload` (LLM이 frontend / backend_api / worker / scheduled_job 중 제안) |
 | `aws.rds.cluster`, 클러스터 밖의 `aws.rds.instance` | 데이터 저장소 | `data_store` |
-| `aws.elbv2.load_balancer` | 진입점 | `network_edge` |
+| `aws.elasticache.cache`, `aws.dynamodb.table`, 다른 사실과 관계가 있는 `aws.s3.bucket` | 데이터 저장소 | `data_store` |
+| 다른 사실과 관계가 있는 `aws.sqs.queue`(한 큐의 DLQ는 그 큐의 멤버)와 `aws.sns.topic` | 큐·토픽 | `messaging` |
+| `aws.elbv2.load_balancer`, `aws.cloudfront.distribution`, `aws.apigateway.api`, `aws.route53.hosted_zone`(호스트 레코드가 멤버) | 진입점 | `network_edge` |
 | 어떤 워크로드와도 연결되지 않은 `code.repository` | 코드만 있는 컴포넌트 | `code_only` |
 
 ```
@@ -266,7 +276,9 @@ type ChangeEvent struct {
 | 보안 그룹 ingress에 `0.0.0.0/0` 또는 `::/0` 추가, 또는 그런 규칙을 가진 보안 그룹이 추가됨 | high |
 | `storage_encrypted` true → false, RDS 인스턴스의 `multi_az` true → false (클러스터의 `multi_az`는 리더 수에 따라 바뀔 수 있어 detail) | high |
 | 서브넷이 private → public | high |
-| internet-facing 로드 밸런서 추가, 워크로드·데이터 저장소 추가 또는 삭제 | medium |
+| S3 버킷이 공개가 됨(`bucket-made-public`: `policy_public`이고 버킷·계정 어느 쪽에도 `RestrictPublicBuckets`가 없음), 또는 그런 버킷이 추가됨. 계정의 block이 풀려 버킷이 공개가 되면 계정 사실에 이벤트 하나 | high |
+| IAM Role의 trust policy가 조건 없이 모든 principal을 허용하게 됨(`role-trusts-anyone`), 또는 그런 Role이 추가됨 | high |
+| internet-facing 로드 밸런서 추가, 워크로드·데이터 저장소·진입점(CloudFront 배포, API, hosted zone) 추가 또는 삭제 | medium |
 | 엔진 major 변경, 런타임 변경, 새 `depends_on` | medium |
 | workflow가 저장된 AWS access key를 쓰기 시작함(`auth`에 `aws:static_keys`가 생김) | medium |
 | 그 밖의 structural 변경 | low |

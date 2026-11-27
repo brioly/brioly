@@ -21,7 +21,8 @@ const (
 	RoleWorkload    = "workload" // refined by the enrich step or the registry
 	RoleDataStore   = "data_store"
 	RoleNetworkEdge = "network_edge"
-	RolePlatform    = "platform" // a cluster that runs workloads, with its nodes
+	RolePlatform    = "platform"  // a cluster that runs workloads, with its nodes
+	RoleMessaging   = "messaging" // a queue or a topic between workloads
 	RoleCodeOnly    = "code_only"
 )
 
@@ -115,6 +116,21 @@ func (ix *index) filter(ids []string, kind string) []string {
 	return out
 }
 
+// connected reports whether a relationship of the request or data flow
+// (routes_to, depends_on, exposes) ties id to another fact that was read.
+func (ix *index) connected(id string) bool {
+	for _, m := range []map[string][]string{ix.out[id], ix.in[id]} {
+		for _, t := range []string{facts.EdgeRoutesTo, facts.EdgeDependsOn, facts.EdgeExposes} {
+			for _, other := range m[t] {
+				if _, ok := ix.byID[other]; ok && other != id {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // Build groups the snapshot's facts into components, applies the registry
 // (which may be nil), and stores the result in s.Components and
 // s.Annotations. It may add built_from edges. Call s.Finalize afterwards.
@@ -189,6 +205,12 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 		}
 		c := add(f, RoleWorkload)
 		c.Members = append(c.Members, ix.targets(f.ID, facts.EdgeUses, "aws.ecs.task_definition")...)
+		// The IAM roles it runs as: the one a function names, and those of
+		// a service's task definition.
+		c.Members = append(c.Members, ix.targets(f.ID, facts.EdgeUses, "aws.iam.role")...)
+		for _, td := range ix.targets(f.ID, facts.EdgeUses, "aws.ecs.task_definition") {
+			c.Members = append(c.Members, ix.targets(td, facts.EdgeUses, "aws.iam.role")...)
+		}
 		c.Members = append(c.Members, ix.sources(f.ID, facts.EdgeRoutesTo, "k8s.service")...)
 		for _, m := range manifestOf[f.ID] {
 			c.Members = append(c.Members, m)
@@ -228,6 +250,58 @@ func Build(s *facts.Snapshot, reg *Registry) []string {
 		case "aws.rds.instance":
 			if _, inCluster := f.Attributes["cluster_id"]; !inCluster {
 				add(f, RoleDataStore)
+			}
+		}
+	}
+
+	// More data stores, queues and topics. A cache or a table is a data
+	// store like a database. Buckets, queues and topics are many in most
+	// accounts (logs, build artifacts, one queue per job), and most are part
+	// of nothing that is described here: one is a component only when a
+	// relationship ties it to something else that was read (a distribution
+	// serves it, it notifies or triggers a function, a topic feeds it).
+	// The others are still listed in the documents.
+	for _, f := range s.Facts {
+		switch f.Kind {
+		case "aws.elasticache.cache", "aws.dynamodb.table":
+			add(f, RoleDataStore)
+		case "aws.s3.bucket":
+			if ix.connected(f.ID) {
+				add(f, RoleDataStore)
+			}
+		case "aws.sns.topic":
+			if ix.connected(f.ID) {
+				add(f, RoleMessaging)
+			}
+		case "aws.sqs.queue":
+			// The dead-letter queue of one queue belongs to that queue.
+			if len(ix.sources(f.ID, facts.EdgeRoutesTo, "aws.sqs.queue")) == 1 && len(ix.targets(f.ID, facts.EdgeRoutesTo, "aws.sqs.queue")) == 0 {
+				continue
+			}
+			if ix.connected(f.ID) {
+				c := add(f, RoleMessaging)
+				for _, dlq := range ix.targets(f.ID, facts.EdgeRoutesTo, "aws.sqs.queue") {
+					if len(ix.sources(dlq, facts.EdgeRoutesTo, "aws.sqs.queue")) == 1 && len(ix.targets(dlq, facts.EdgeRoutesTo, "aws.sqs.queue")) == 0 {
+						c.Members = append(c.Members, dlq)
+					}
+				}
+			}
+		}
+	}
+
+	// More entry points: a CloudFront distribution, an API Gateway API, and
+	// a Route 53 zone with the records that name hosts (like a Cloudflare
+	// zone, below).
+	for _, f := range s.Facts {
+		switch f.Kind {
+		case "aws.cloudfront.distribution", "aws.apigateway.api":
+			add(f, RoleNetworkEdge)
+		case "aws.route53.hosted_zone":
+			c := add(f, RoleNetworkEdge)
+			for _, r := range ix.targets(f.ID, facts.EdgeContains, "aws.route53.record") {
+				if HostRecord(ix.byID[r]) {
+					c.Members = append(c.Members, r)
+				}
 			}
 		}
 	}

@@ -272,6 +272,10 @@ func (deniedLambda) ListFunctions(context.Context, *lambda.ListFunctionsInput, .
 	return nil, &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized"}
 }
 
+func (deniedLambda) ListEventSourceMappings(context.Context, *lambda.ListEventSourceMappingsInput, ...func(*lambda.Options)) (*lambda.ListEventSourceMappingsOutput, error) {
+	return nil, &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "not authorized"}
+}
+
 func run(t *testing.T, revision int32, imageTag string) collect.Result {
 	t.Helper()
 	return CollectRegion(context.Background(), Clients{

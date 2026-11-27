@@ -547,6 +547,14 @@ func (s *scan) addTaskDefinition(td *ecstypes.TaskDefinition) {
 	f.Attributes["memory"] = aws.ToString(td.Memory)
 	f.Attributes["network_mode"] = string(td.NetworkMode)
 	f.Attributes["requires_compatibilities"] = facts.SortedStrings(compat)
+	if r := roleName(aws.ToString(td.TaskRoleArn)); r != "" {
+		f.Attributes["task_role"] = r
+		s.usesRole(f.ID, aws.ToString(td.TaskRoleArn))
+	}
+	if r := roleName(aws.ToString(td.ExecutionRoleArn)); r != "" {
+		f.Attributes["execution_role"] = r
+		s.usesRole(f.ID, aws.ToString(td.ExecutionRoleArn))
+	}
 
 	var containers []any
 	var imageRefs, values []string
@@ -657,6 +665,10 @@ func (s *scan) collectLambda() {
 				}
 			}
 			f.Attributes["env_keys"] = facts.SortedStrings(keys)
+			if r := roleName(aws.ToString(fn.Role)); r != "" {
+				f.Attributes["role"] = r
+				s.usesRole(f.ID, aws.ToString(fn.Role))
+			}
 			f.Volatile = map[string]any{
 				"last_modified": aws.ToString(fn.LastModified), "code_sha256": aws.ToString(fn.CodeSha256),
 			}

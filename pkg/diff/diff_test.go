@@ -360,3 +360,108 @@ func TestCloudflareRules(t *testing.T) {
 		}
 	}
 }
+
+// A bucket is public by its policy, its own public access block and the
+// account's, which is a fact of its own: whichever of them changes, the
+// event is high when a bucket became public and not otherwise; and one
+// partly read bucket does not silence the rest.
+func TestBucketAndRoleSeverity(t *testing.T) {
+	src := facts.Source{Connector: "aws", Scope: "111122223333"}
+	restrict := []string{"RestrictPublicBuckets"}
+	snap := func(account []string, buckets map[string][2]any, roleOpen bool) *facts.Snapshot {
+		s := &facts.Snapshot{Coverage: []facts.Coverage{
+			{Connector: "aws", Scope: src.Scope, Kind: "aws.s3.bucket", Status: facts.CoverageComplete},
+			{Connector: "aws", Scope: src.Scope, Kind: "aws.iam.role", Status: facts.CoverageComplete},
+		}}
+		mk := func(id, kind string, attrs map[string]any) {
+			f := facts.NewObserved(id, kind, id, src, facts.SourceRef{Type: facts.RefARN, Value: id}, time.Unix(0, 0))
+			f.Attributes = attrs
+			s.Facts = append(s.Facts, f)
+		}
+		mk("aws:account-block", "aws.s3.account_public_access_block", map[string]any{"settings": account})
+		for name, v := range buckets {
+			attrs := map[string]any{"public_access_block": v[1]}
+			if v[0] != nil {
+				attrs["policy_public"] = v[0]
+			} else {
+				attrs["unread"] = []string{"policy_status"} // this bucket's own policy refuses the scanner
+			}
+			mk("aws:"+name, "aws.s3.bucket", attrs)
+		}
+		mk("aws:role", "aws.iam.role", map[string]any{"trusts_anyone": roleOpen})
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	high := func(old, new *facts.Snapshot) map[string]string {
+		out := map[string]string{}
+		for _, e := range Compare(old, new).Events {
+			if e.Severity == High {
+				out[e.Subject] = e.RuleID
+			}
+		}
+		return out
+	}
+	none := []string{}
+	base := map[string][2]any{"a": {false, none}, "b": {true, restrict}, "locked": {nil, none}}
+
+	// A policy made public, a block removed, a role opened: three high
+	// events, with a bucket in the same account that is never fully read.
+	got := high(snap(none, base, false), snap(none, map[string][2]any{"a": {true, none}, "b": {true, none}, "locked": {nil, none}}, true))
+	if len(got) != 3 || got["aws:a"] != "bucket-made-public" || got["aws:b"] != "bucket-made-public" || got["aws:role"] != "role-trusts-anyone" {
+		t.Errorf("high events = %v", got)
+	}
+	// Under the account's block a public policy opens nothing.
+	if got := high(snap(restrict, base, false), snap(restrict, map[string][2]any{"a": {true, none}, "b": {true, restrict}, "locked": {nil, none}}, false)); len(got) != 0 {
+		t.Errorf("events under the account's block = %v", got)
+	}
+	// Opening the account's block is one event, on the account's fact,
+	// however many buckets it opens.
+	open := map[string][2]any{"a": {true, none}, "b": {true, none}, "locked": {nil, none}}
+	if got := high(snap(restrict, open, false), snap(none, open, false)); len(got) != 1 || got["aws:account-block"] != "bucket-made-public" {
+		t.Errorf("events of an opened account block = %v", got)
+	}
+	// A change that opens nothing is not high: another setting of a bucket
+	// that was already public.
+	if got := high(snap(none, open, false), snap(none, map[string][2]any{"a": {true, []string{"BlockPublicAcls"}}, "b": {true, none}, "locked": {nil, none}}, false)); len(got) != 0 {
+		t.Errorf("events of an unrelated setting = %v", got)
+	}
+	// Something that becomes readable did not change. A bucket whose
+	// policy status was refused and is now read as public, and a bucket
+	// seen while the account's block was not read, raise nothing.
+	if got := high(snap(none, map[string][2]any{"locked": {nil, none}}, false), snap(none, map[string][2]any{"locked": {true, none}}, false)); len(got) != 0 {
+		t.Errorf("a bucket that became readable: %v", got)
+	}
+	noAccount := snap(none, open, false)
+	for i, f := range noAccount.Facts {
+		if f.Kind == "aws.s3.account_public_access_block" {
+			noAccount.Facts = append(noAccount.Facts[:i], noAccount.Facts[i+1:]...)
+			break
+		}
+	}
+	if err := noAccount.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if got := high(noAccount, snap(none, open, false)); len(got) != 0 {
+		t.Errorf("an account block that became readable: %v", got)
+	}
+	// Likewise a role whose trust policy could not be read before.
+	role := func(attrs map[string]any) *facts.Snapshot {
+		s := &facts.Snapshot{Coverage: []facts.Coverage{{Connector: "aws", Scope: src.Scope, Kind: "aws.iam.role", Status: facts.CoverageComplete}}}
+		f := facts.NewObserved("aws:role", "aws.iam.role", "role", src, facts.SourceRef{Type: facts.RefARN, Value: "role"}, time.Unix(0, 0))
+		f.Attributes = attrs
+		s.Facts = []facts.Fact{f}
+		if err := s.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if got := high(role(map[string]any{"unread": []string{"trust_policy"}}), role(map[string]any{"trusts_anyone": true})); len(got) != 0 {
+		t.Errorf("a trust policy that became readable: %v", got)
+	}
+	// A bucket that is public on the day it is first seen.
+	if got := high(snap(none, base, false), snap(none, map[string][2]any{"a": {false, none}, "b": {true, restrict}, "locked": {nil, none}, "new": {true, none}}, false)); got["aws:new"] != "bucket-made-public" {
+		t.Errorf("a new public bucket: %v", got)
+	}
+}

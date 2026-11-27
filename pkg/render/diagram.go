@@ -18,6 +18,25 @@ var diagramKinds = map[string]string{
 	"aws.rds.instance": "db", "aws.eks.cluster": "svc", "k8s.cluster": "svc",
 	"cloudflare.zone": "lb", "cloudflare.load_balancer": "lb", "cloudflare.tunnel": "lb",
 	"cloudflare.worker": "fn", "cloudflare.pages_project": "svc",
+	"aws.cloudfront.distribution": "lb", "aws.apigateway.api": "lb", "aws.elasticache.cache": "db",
+	// Drawn only when a line reaches them (see flowKinds).
+	"aws.s3.bucket": "db", "aws.dynamodb.table": "db", "aws.sqs.queue": "svc", "aws.sns.topic": "svc",
+}
+
+// flowKinds are drawn only when something leads to them or they lead to
+// something: most accounts hold many buckets, tables, queues and topics
+// that are part of no flow the diagram shows.
+var flowKinds = map[string]bool{"aws.s3.bucket": true, "aws.dynamodb.table": true, "aws.sqs.queue": true, "aws.sns.topic": true}
+
+// inFlow reports whether a routes_to or depends_on relationship ties a fact
+// to another fact that was read.
+func (g *graph) inFlow(id string) bool {
+	for _, t := range []string{facts.EdgeRoutesTo, facts.EdgeDependsOn} {
+		if len(g.targets(id, t))+len(g.sources(id, t)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // cloudflareArea is the key of the diagram area that holds what runs on
@@ -190,6 +209,9 @@ func diagramOf(g *graph) *SystemDiagram {
 				continue // nodes are drawn as their EKS cluster
 			}
 		}
+		if flowKinds[f.Kind] && !g.inFlow(f.ID) {
+			continue
+		}
 		if f.Kind == "cloudflare.zone" && !servesHosts(g, f) {
 			continue // a zone of mail and text records only is not part of the request flow
 		}
@@ -339,9 +361,21 @@ func diagramOf(g *graph) *SystemDiagram {
 		}
 		links = append(links, link(l))
 	}
+	moreLinks, events := awsLinks(g, drawn)
+	for _, l := range moreLinks {
+		if l.from == "internet" {
+			d.Internet = true
+		}
+		links = append(links, link(l))
+	}
 	path := map[link]bool{}
 	for _, l := range links {
 		path[l] = true
+	}
+	// What a notification, a subscription or an event source delivers is
+	// not a path a request from outside takes.
+	for _, l := range events {
+		dependency[link(l)] = true
 	}
 	for _, e := range g.snap.Edges {
 		if e.Type != facts.EdgeDependsOn || !drawn[e.From] {
@@ -392,6 +426,20 @@ func shortKind(f facts.Fact) string {
 	case "k8s.workload":
 		// Only the kind: the box of its cluster already says Kubernetes.
 		return strAttr(f, "workload_kind")
+	case "aws.cloudfront.distribution":
+		return "CloudFront"
+	case "aws.apigateway.api":
+		return "API Gateway " + strAttr(f, "protocol")
+	case "aws.elasticache.cache":
+		return "ElastiCache " + strAttr(f, "engine")
+	case "aws.s3.bucket":
+		return "S3 bucket"
+	case "aws.dynamodb.table":
+		return "DynamoDB"
+	case "aws.sqs.queue":
+		return "SQS queue"
+	case "aws.sns.topic":
+		return "SNS topic"
 	case "cloudflare.zone":
 		return "DNS zone"
 	case "cloudflare.load_balancer":

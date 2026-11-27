@@ -27,6 +27,7 @@ amazon-aurora-postgresql|Amazon Aurora PostgreSQL
 amazon-rds-mysql|Amazon RDS for MySQL
 amazon-aurora-mysql|Amazon Aurora MySQL
 amazon-rds-mariadb|Amazon RDS for MariaDB
+amazon-elasticache-redis|Amazon ElastiCache for Redis OSS
 nodejs|Node.js
 python|Python
 go|Go

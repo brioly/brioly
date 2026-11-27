@@ -108,8 +108,12 @@ func sceneKind(f facts.Fact) string {
 		return "Ingress"
 	case "aws.ec2.security_group":
 		return "Security group"
-	case "cloudflare.dns_record":
+	case "cloudflare.dns_record", "aws.route53.record":
 		return screenText(strings.TrimSpace("DNS record " + strAttr(f, "record_type")))
+	case "aws.route53.hosted_zone":
+		return "DNS zone"
+	case "aws.iam.role":
+		return "IAM role"
 	}
 	return screenText(f.Kind)
 }
