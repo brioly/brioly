@@ -1,7 +1,12 @@
-// Package aws collects metadata about AWS resources. It only calls Describe
-// and List APIs, only copies allow-listed attributes, and never stores
-// environment variable values: values are used in memory to find which
-// resource a service talks to, then discarded.
+// Package aws collects the configuration of AWS resources. It calls the
+// read actions listed in docs/examples/aws-readonly-policy.json (List,
+// Describe and a few Get actions that return configuration), never one that
+// returns data (objects, messages, items), only copies allow-listed
+// attributes, and never stores environment variable values: values are used
+// in memory to find which resource a service talks to, then discarded.
+// Several of the answers hold more than is kept (policy documents, stage
+// variables, custom origin headers, subscription endpoints): those fields
+// are not copied into any fact.
 package aws
 
 import (
@@ -15,14 +20,25 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/apigateway"
+	"github.com/aws/aws-sdk-go-v2/service/apigatewayv2"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
+	"github.com/aws/aws-sdk-go-v2/service/elasticache"
 	elb "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3control"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 
@@ -89,6 +105,91 @@ type RDSAPI interface {
 // LambdaAPI is the subset of the Lambda client used by the collector.
 type LambdaAPI interface {
 	ListFunctions(context.Context, *lambda.ListFunctionsInput, ...func(*lambda.Options)) (*lambda.ListFunctionsOutput, error)
+	ListEventSourceMappings(context.Context, *lambda.ListEventSourceMappingsInput, ...func(*lambda.Options)) (*lambda.ListEventSourceMappingsOutput, error)
+}
+
+// APIGatewayAPI is the subset of the API Gateway (REST APIs) client used by
+// the collector. Every call is a GET of one of the paths the read-only
+// policy names; exports, API keys and authorizers are never requested.
+type APIGatewayAPI interface {
+	GetRestApis(context.Context, *apigateway.GetRestApisInput, ...func(*apigateway.Options)) (*apigateway.GetRestApisOutput, error)
+	GetResources(context.Context, *apigateway.GetResourcesInput, ...func(*apigateway.Options)) (*apigateway.GetResourcesOutput, error)
+	GetStages(context.Context, *apigateway.GetStagesInput, ...func(*apigateway.Options)) (*apigateway.GetStagesOutput, error)
+	GetVpcLinks(context.Context, *apigateway.GetVpcLinksInput, ...func(*apigateway.Options)) (*apigateway.GetVpcLinksOutput, error)
+	GetDomainNames(context.Context, *apigateway.GetDomainNamesInput, ...func(*apigateway.Options)) (*apigateway.GetDomainNamesOutput, error)
+	GetBasePathMappings(context.Context, *apigateway.GetBasePathMappingsInput, ...func(*apigateway.Options)) (*apigateway.GetBasePathMappingsOutput, error)
+}
+
+// APIGatewayV2API is the subset of the API Gateway v2 (HTTP and WebSocket
+// APIs) client used by the collector.
+type APIGatewayV2API interface {
+	GetApis(context.Context, *apigatewayv2.GetApisInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetApisOutput, error)
+	GetRoutes(context.Context, *apigatewayv2.GetRoutesInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetRoutesOutput, error)
+	GetIntegrations(context.Context, *apigatewayv2.GetIntegrationsInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetIntegrationsOutput, error)
+	GetStages(context.Context, *apigatewayv2.GetStagesInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetStagesOutput, error)
+	GetApiMappings(context.Context, *apigatewayv2.GetApiMappingsInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetApiMappingsOutput, error)
+}
+
+// SQSAPI is the subset of the SQS client used by the collector. No message
+// is ever received.
+type SQSAPI interface {
+	ListQueues(context.Context, *sqs.ListQueuesInput, ...func(*sqs.Options)) (*sqs.ListQueuesOutput, error)
+	GetQueueAttributes(context.Context, *sqs.GetQueueAttributesInput, ...func(*sqs.Options)) (*sqs.GetQueueAttributesOutput, error)
+}
+
+// SNSAPI is the subset of the SNS client used by the collector.
+type SNSAPI interface {
+	ListTopics(context.Context, *sns.ListTopicsInput, ...func(*sns.Options)) (*sns.ListTopicsOutput, error)
+	ListSubscriptions(context.Context, *sns.ListSubscriptionsInput, ...func(*sns.Options)) (*sns.ListSubscriptionsOutput, error)
+}
+
+// DynamoDBAPI is the subset of the DynamoDB client used by the collector. No
+// item is ever read.
+type DynamoDBAPI interface {
+	ListTables(context.Context, *dynamodb.ListTablesInput, ...func(*dynamodb.Options)) (*dynamodb.ListTablesOutput, error)
+	DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
+}
+
+// ElastiCacheAPI is the subset of the ElastiCache client used by the
+// collector.
+type ElastiCacheAPI interface {
+	DescribeReplicationGroups(context.Context, *elasticache.DescribeReplicationGroupsInput, ...func(*elasticache.Options)) (*elasticache.DescribeReplicationGroupsOutput, error)
+	DescribeCacheClusters(context.Context, *elasticache.DescribeCacheClustersInput, ...func(*elasticache.Options)) (*elasticache.DescribeCacheClustersOutput, error)
+	DescribeServerlessCaches(context.Context, *elasticache.DescribeServerlessCachesInput, ...func(*elasticache.Options)) (*elasticache.DescribeServerlessCachesOutput, error)
+}
+
+// S3API is the subset of the S3 client used by the collector. No object is
+// ever listed or read, and the bucket policy document is never requested.
+type S3API interface {
+	ListBuckets(context.Context, *s3.ListBucketsInput, ...func(*s3.Options)) (*s3.ListBucketsOutput, error)
+	GetBucketLocation(context.Context, *s3.GetBucketLocationInput, ...func(*s3.Options)) (*s3.GetBucketLocationOutput, error)
+	GetPublicAccessBlock(context.Context, *s3.GetPublicAccessBlockInput, ...func(*s3.Options)) (*s3.GetPublicAccessBlockOutput, error)
+	GetBucketPolicyStatus(context.Context, *s3.GetBucketPolicyStatusInput, ...func(*s3.Options)) (*s3.GetBucketPolicyStatusOutput, error)
+	GetBucketNotificationConfiguration(context.Context, *s3.GetBucketNotificationConfigurationInput, ...func(*s3.Options)) (*s3.GetBucketNotificationConfigurationOutput, error)
+}
+
+// S3ControlAPI reads the account's public access block.
+type S3ControlAPI interface {
+	GetPublicAccessBlock(context.Context, *s3control.GetPublicAccessBlockInput, ...func(*s3control.Options)) (*s3control.GetPublicAccessBlockOutput, error)
+}
+
+// CloudFrontAPI is the subset of the CloudFront client used by the collector.
+type CloudFrontAPI interface {
+	ListDistributions(context.Context, *cloudfront.ListDistributionsInput, ...func(*cloudfront.Options)) (*cloudfront.ListDistributionsOutput, error)
+}
+
+// Route53API is the subset of the Route 53 client used by the collector.
+type Route53API interface {
+	ListHostedZones(context.Context, *route53.ListHostedZonesInput, ...func(*route53.Options)) (*route53.ListHostedZonesOutput, error)
+	ListResourceRecordSets(context.Context, *route53.ListResourceRecordSetsInput, ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error)
+}
+
+// IAMAPI is the subset of the IAM client used by the collector: roles
+// only, and no call that returns a permissions policy document.
+type IAMAPI interface {
+	ListRoles(context.Context, *iam.ListRolesInput, ...func(*iam.Options)) (*iam.ListRolesOutput, error)
+	ListAttachedRolePolicies(context.Context, *iam.ListAttachedRolePoliciesInput, ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error)
+	ListRolePolicies(context.Context, *iam.ListRolePoliciesInput, ...func(*iam.Options)) (*iam.ListRolePoliciesOutput, error)
 }
 
 // AutoScalingAPI is the subset of the Auto Scaling client used by the
@@ -97,7 +198,8 @@ type AutoScalingAPI interface {
 	DescribeAutoScalingGroups(context.Context, *autoscaling.DescribeAutoScalingGroupsInput, ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error)
 }
 
-// Clients groups the service clients for one region.
+// Clients groups the service clients for one region. A nil client among
+// those marked so skips its service: nothing is recorded about it.
 type Clients struct {
 	EC2    EC2API
 	ASG    AutoScalingAPI
@@ -106,6 +208,24 @@ type Clients struct {
 	EKS    EKSAPI // nil skips EKS
 	RDS    RDSAPI
 	Lambda LambdaAPI
+
+	// nil skips each of these.
+	APIGateway   APIGatewayAPI
+	APIGatewayV2 APIGatewayV2API
+	SQS          SQSAPI
+	SNS          SNSAPI
+	DynamoDB     DynamoDBAPI
+	ElastiCache  ElastiCacheAPI
+}
+
+// GlobalClients groups the clients of the services that are read once per
+// account, not per region. A nil client skips its service.
+type GlobalClients struct {
+	S3         S3API
+	S3Control  S3ControlAPI
+	CloudFront CloudFrontAPI
+	Route53    Route53API
+	IAM        IAMAPI
 }
 
 // Account identifies the scanned account.
@@ -156,6 +276,13 @@ func Collect(ctx context.Context, opts Options) (collect.Result, error) {
 			EKS:    eks.NewFromConfig(rcfg),
 			RDS:    rds.NewFromConfig(rcfg),
 			Lambda: lambda.NewFromConfig(rcfg),
+
+			APIGateway:   apigateway.NewFromConfig(rcfg),
+			APIGatewayV2: apigatewayv2.NewFromConfig(rcfg),
+			SQS:          sqs.NewFromConfig(rcfg),
+			SNS:          sns.NewFromConfig(rcfg),
+			DynamoDB:     dynamodb.NewFromConfig(rcfg),
+			ElastiCache:  elasticache.NewFromConfig(rcfg),
 		}
 		r := CollectRegion(ctx, clients, acct, region, now())
 		// The collector only knows where a cluster is; the credentials to
@@ -165,7 +292,43 @@ func Collect(ctx context.Context, opts Options) (collect.Result, error) {
 		}
 		res.Merge(r)
 	}
+	// The services that have no region are read once. Their API endpoints
+	// are in the partition's home region, whichever regions are scanned.
+	gcfg := cfg.Copy()
+	gcfg.Region = globalRegion(acct.Partition)
+	res.Merge(CollectGlobal(ctx, GlobalClients{
+		S3:         s3.NewFromConfig(gcfg),
+		S3Control:  s3control.NewFromConfig(gcfg),
+		CloudFront: cloudfront.NewFromConfig(gcfg),
+		Route53:    route53.NewFromConfig(gcfg),
+		IAM:        iam.NewFromConfig(gcfg),
+	}, acct, now()))
 	return res, nil
+}
+
+// globalRegion is the region whose endpoints serve a partition's global
+// services.
+func globalRegion(partition string) string {
+	switch partition {
+	case "aws-cn":
+		return "cn-north-1"
+	case "aws-us-gov":
+		return "us-gov-west-1"
+	}
+	return "us-east-1"
+}
+
+// CollectGlobal reads the services that are not regional: S3 (buckets are
+// listed once; each carries its own region), CloudFront, Route 53 and IAM
+// roles. Their facts and coverage have no region. Like CollectRegion it
+// records errors as coverage and returns none.
+func CollectGlobal(ctx context.Context, c GlobalClients, acct Account, now time.Time) collect.Result {
+	s := &scan{ctx: ctx, g: c, acct: acct, now: now}
+	s.collectS3()
+	s.collectCloudFront()
+	s.collectRoute53()
+	s.collectIAMRoles()
+	return s.res
 }
 
 // CollectRegion scans one region. Errors are recorded as coverage, not
@@ -198,6 +361,12 @@ func CollectRegion(ctx context.Context, c Clients, acct Account, region string, 
 	s.collectRDS()
 	s.collectECS()
 	s.collectLambda()
+	s.collectElastiCache()
+	s.collectDynamoDB()
+	s.collectSQS()
+	s.collectSNS()
+	s.collectEventSources()
+	s.collectAPIGateway()
 	s.linkDependencies()
 	s.res.Endpoints = s.endpoints
 	return s.res
@@ -207,6 +376,7 @@ func CollectRegion(ctx context.Context, c Clients, acct Account, region string, 
 type scan struct {
 	ctx    context.Context
 	c      Clients
+	g      GlobalClients // set instead of c for the services without a region
 	acct   Account
 	region string
 	now    time.Time
@@ -304,6 +474,44 @@ func (s *scan) coverChild(kind, parentKind string, parentErr, err error) {
 	s.cover(kind, err)
 }
 
+// coverParts records the coverage of a kind whose facts take more calls
+// than the listing: complete, the listing's failure, or partial when the
+// listing worked and a call for one of the things listed did not (what was
+// read of it is kept, what was not is absent, never a guess).
+func (s *scan) coverParts(kind string, listErr, partErr error, part string) {
+	if listErr == nil && partErr != nil {
+		s.res.Coverage = append(s.res.Coverage, facts.Coverage{Connector: "aws", Scope: s.acct.ID, Region: s.region,
+			Kind: kind, Status: facts.CoveragePartial, Detail: part + ": " + partErr.Error()})
+		return
+	}
+	s.cover(kind, listErr)
+}
+
+// errorCode returns the AWS error code of err, or "".
+func errorCode(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
+	}
+	return ""
+}
+
+// roleName returns the name of an IAM role with its path ("service/api")
+// from its ARN.
+func roleName(arn string) string {
+	if i := strings.Index(arn, ":role/"); i >= 0 {
+		return arn[i+len(":role/"):]
+	}
+	return ""
+}
+
+// usesRole links a workload to the IAM role it names.
+func (s *scan) usesRole(factID, roleARN string) {
+	if roleName(roleARN) != "" {
+		s.edge(facts.EdgeUses, factID, facts.AWSID(roleARN))
+	}
+}
+
 func firstErr(errs ...error) error {
 	for _, e := range errs {
 		if e != nil {
@@ -329,7 +537,9 @@ var deniedCodes = map[string]bool{
 
 func classify(err error) string {
 	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) && deniedCodes[apiErr.ErrorCode()] {
+	// Services spell a refusal differently ("AccessDenied",
+	// "AccessDeniedException", "AWS.SimpleQueueService.AccessDenied", ...).
+	if errors.As(err, &apiErr) && (deniedCodes[apiErr.ErrorCode()] || strings.Contains(apiErr.ErrorCode(), "AccessDenied")) {
 		return facts.CoverageDenied
 	}
 	return facts.CoverageError

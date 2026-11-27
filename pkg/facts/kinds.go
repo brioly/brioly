@@ -8,7 +8,7 @@ import (
 // RegistryVersion changes whenever the classification or a normalization
 // rule below changes. It is part of a snapshot's baseline key: snapshots
 // with different keys are not diffed against each other.
-const RegistryVersion = 7
+const RegistryVersion = 8
 
 // Kind declares, for one fact kind, which attributes exist and what a change
 // to each of them means. See docs/design/fact-schema-v1.md.
@@ -73,12 +73,14 @@ var Kinds = map[string]Kind{
 	"aws.ecs.task_definition": {
 		// containers holds name, image repository and ports; env and secret
 		// key names are split off into details by the collector.
-		Structural: []string{"network_mode", "requires_compatibilities", "containers"},
+		// task_role and execution_role are the names (with path) of the IAM
+		// roles the tasks run as and are started with.
+		Structural: []string{"network_mode", "requires_compatibilities", "containers", "task_role", "execution_role"},
 		Detail:     []string{"cpu", "memory", "container_env_keys", "container_secret_keys"},
 		Volatile:   []string{"revision", "image_refs"},
 	},
 	"aws.lambda.function": {
-		Structural: []string{"runtime", "package_type", "subnet_ids", "security_group_ids"},
+		Structural: []string{"runtime", "package_type", "subnet_ids", "security_group_ids", "role"},
 		Detail:     []string{"handler", "memory_mb", "timeout_s", "architectures", "env_keys"},
 		Volatile:   []string{"last_modified", "code_sha256"},
 		Anchor:     true,
@@ -111,6 +113,89 @@ var Kinds = map[string]Kind{
 		Detail:     []string{"engine_version", "instance_class", "endpoint"},
 		Volatile:   []string{"status"},
 		Anchor:     true, // only when it is not part of a cluster
+	},
+
+	// ---- AWS storage, delivery, DNS, APIs, messaging ----
+	// Nothing below holds data or a policy document: no object, message or
+	// item is ever requested, and of a policy only what AWS itself derives
+	// from it (policy_public). Nothing that changes on a deploy or with use
+	// is kept: no modification times, ETags, item counts or queue depths.
+	"aws.s3.bucket": {
+		// public_access_block and account_public_access_block list the
+		// settings that are on, for the bucket and for its account;
+		// policy_public is AWS's own judgment of the bucket policy
+		// (GetBucketPolicyStatus), false for a bucket without a policy.
+		// Each is absent when it could not be read.
+		Structural: []string{"region", "public_access_block", "account_public_access_block", "policy_public"},
+		Anchor:     true,
+	},
+	"aws.cloudfront.distribution": {
+		// origins are host names; origin_protocols how the distribution
+		// connects to them ("s3", "https-only", "http-only", "match-viewer",
+		// "vpc"); viewer_protocol_policies those of every cache behaviour.
+		// Custom origin headers are never copied: they carry shared secrets.
+		Structural: []string{"aliases", "origins", "origin_protocols", "viewer_protocol_policies", "enabled", "web_acl", "min_tls_version", "default_certificate"},
+		Detail:     []string{"domain_name", "distribution_id", "price_class"},
+		Volatile:   []string{"status"},
+		Anchor:     true,
+	},
+	"aws.route53.hosted_zone": {
+		Structural: []string{"private"},
+		Detail:     []string{"zone_id"},
+		Volatile:   []string{"record_set_count"},
+		Anchor:     true,
+	},
+	// One fact per zone, name and type: the record sets of a name (weighted,
+	// latency, ...) are a set. targets holds alias targets and the values of
+	// address-like records only (A, AAAA, CNAME, MX, NS); the value of TXT
+	// and every other type is never kept.
+	"aws.route53.record": {
+		Structural: []string{"zone", "record_type", "alias", "routing", "targets"},
+		Detail:     []string{"ttl", "record_count"},
+	},
+	"aws.apigateway.api": {
+		// REST, HTTP and WebSocket APIs. authorization is the set of
+		// authorization types its routes use ("NONE" among them when a route
+		// asks for none); integrations the kinds of what routes lead to;
+		// domains its custom domain names. Stage variables, API keys and
+		// resource policies are never kept.
+		Structural: []string{"protocol", "endpoint_type", "default_endpoint_disabled", "stages", "authorization", "integrations", "domains"},
+		Detail:     []string{"api_id", "endpoint", "routes", "integration_hosts", "domain_targets"},
+		Anchor:     true,
+	},
+	"aws.sqs.queue": {
+		Structural: []string{"fifo", "dead_letter_queue", "encryption"},
+		Detail:     []string{"visibility_timeout_s", "retention_s", "max_receive_count"},
+		Anchor:     true,
+	},
+	"aws.sns.topic": {
+		// Of a subscription only its protocol is kept, and where it leads
+		// when that is a queue or a function (as a relationship): never an
+		// email address, a phone number or a URL.
+		Structural: []string{"fifo", "subscription_protocols"},
+		Detail:     []string{"subscription_count"},
+		Anchor:     true,
+	},
+	"aws.dynamodb.table": {
+		Structural: []string{"key_schema", "billing_mode", "global_secondary_indexes", "stream", "encryption", "replica_regions", "deletion_protection"},
+		Detail:     []string{"table_class"},
+		Volatile:   []string{"status"},
+		Anchor:     true,
+	},
+	// A replication group, a cache cluster that is in none, or a serverless
+	// cache (deployment says which). auth_token_enabled is a yes or no; the
+	// token itself is not something AWS returns.
+	"aws.elasticache.cache": {
+		Structural: []string{"deployment", "engine", "engine_major", "cluster_mode", "multi_az", "automatic_failover", "transit_encryption", "at_rest_encryption",
+			"auth_token_enabled", "subnet_group", "subnet_ids", "security_group_ids"},
+		Detail:   []string{"engine_version", "node_type", "endpoint", "reader_endpoint"},
+		Volatile: []string{"status", "member_count"},
+		Anchor:   true,
+	},
+	// A role, without its policy documents: who may assume it (the
+	// principals of its trust policy) and the names of what is attached.
+	"aws.iam.role": {
+		Structural: []string{"path", "trusted_services", "trusted_accounts", "trusted_federated", "trusts_anyone", "attached_policies", "inline_policy_names"},
 	},
 
 	// ---- Code ----

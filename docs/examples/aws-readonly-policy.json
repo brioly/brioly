@@ -30,9 +30,50 @@
         "eks:ListClusters",
         "eks:DescribeCluster",
         "eks:ListNodegroups",
-        "eks:DescribeNodegroup"
+        "eks:DescribeNodegroup",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketPolicyStatus",
+        "s3:GetBucketNotification",
+        "s3:GetAccountPublicAccessBlock",
+        "cloudfront:ListDistributions",
+        "route53:ListHostedZones",
+        "route53:ListResourceRecordSets",
+        "sqs:ListQueues",
+        "sqs:GetQueueAttributes",
+        "sns:ListTopics",
+        "sns:ListSubscriptions",
+        "dynamodb:ListTables",
+        "dynamodb:DescribeTable",
+        "elasticache:DescribeReplicationGroups",
+        "elasticache:DescribeCacheClusters",
+        "elasticache:DescribeServerlessCaches",
+        "lambda:ListEventSourceMappings",
+        "iam:ListRoles",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:*::/restapis",
+        "arn:aws:apigateway:*::/restapis/*/resources",
+        "arn:aws:apigateway:*::/restapis/*/stages",
+        "arn:aws:apigateway:*::/vpclinks",
+        "arn:aws:apigateway:*::/apis",
+        "arn:aws:apigateway:*::/apis/*/routes",
+        "arn:aws:apigateway:*::/apis/*/integrations",
+        "arn:aws:apigateway:*::/apis/*/stages",
+        "arn:aws:apigateway:*::/domainnames",
+        "arn:aws:apigateway:*::/domainnames/*/basepathmappings",
+        "arn:aws:apigateway:*::/domainnames/*/apimappings"
+      ]
     }
   ]
 }
