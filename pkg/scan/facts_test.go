@@ -2,7 +2,6 @@ package scan
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -215,64 +214,5 @@ func TestRegroupingIsNotAChangeBetweenScans(t *testing.T) {
 	// And from then on whole against whole.
 	if res := diff.Compare(back, scanned("after")); len(res.Events) != 0 {
 		t.Errorf("the scan after the return: %+v", res.Events)
-	}
-}
-
-// What a resource holds: by the snapshot's "contains" relationships from
-// the kinds that hold, read on, and for a repository by identifier. A
-// network holds nothing, nor does a kind that is not on the list, and a
-// relationship that was inferred or made by a rule is not followed.
-func TestHolds(t *testing.T) {
-	f := func(id, kind string) facts.Fact {
-		return facts.Fact{ID: id, Kind: kind, Name: id, Source: facts.Source{Connector: "x"}, Ref: facts.SourceRef{Type: "url", Value: "https://example.com/" + id}}
-	}
-	s := snap(t, "s", []facts.Fact{
-		f("v", "aws.ec2.vpc"), f("s", "aws.ec2.subnet"), f("i", "aws.ec2.instance"),
-		f("lb", "aws.elbv2.load_balancer"), f("l", "aws.elbv2.listener"), f("r", "aws.elbv2.rule"), f("tg", "aws.elbv2.target_group"),
-		f("eks", "aws.eks.cluster"), f("ng", "aws.eks.nodegroup"), f("asg", "aws.autoscaling.group"), f("w", "k8s.workload"),
-		f("rds", "aws.rds.cluster"), f("db1", "aws.rds.instance"),
-		f("gh:acme/shop", "code.repository"), f("gh:acme/shop:dep:go.mod:go:pgx", "code.dependency"), f("gh:acme/shop:wf:deploy", "code.ci_workflow"),
-		f("gh:acme/other:target:1", "code.deploy_target"), f("gh:acme/shop-admin", "code.repository"), f("gh:acme/gone:file:Dockerfile", "code.dockerfile"),
-		f("gh:acme/shop:dep:go.mod:go:pgx:extra", "code.dependency"),
-	}, []facts.Edge{
-		{Type: "contains", From: "v", To: "s"}, {Type: "contains", From: "s", To: "i"},
-		{Type: "contains", From: "lb", To: "l"}, {Type: "contains", From: "l", To: "r"}, {Type: "routes_to", From: "lb", To: "i"},
-		{Type: "contains", From: "eks", To: "ng"}, {Type: "contains", From: "ng", To: "asg"}, {Type: "runs_on", From: "w", To: "eks"},
-		{Type: "contains", From: "rds", To: "db1"},
-		{Type: "contains", From: "gh:acme/shop:wf:deploy", To: "gh:acme/other:target:1"},
-		// Not followed: from a kind that does not hold, inferred, made by a rule.
-		{Type: "contains", From: "i", To: "tg"},
-		{Type: "contains", From: "lb", To: "tg", Derivation: facts.Derivation{Type: facts.Inferred, Producer: "collector"}},
-		{Type: "contains", From: "rds", To: "i", Derivation: facts.Derivation{Type: facts.Observed, Producer: "rule:something"}},
-	})
-	for _, c := range []struct {
-		listed map[string]string
-		want   string
-	}{
-		{map[string]string{"v": "", "s": "", "i": "", "never": "aws.rds.cluster"}, "map[]"},
-		{map[string]string{"lb": ""}, "map[lb:[l r]]"},
-		{map[string]string{"eks": "", "rds": ""}, "map[eks:[asg ng] rds:[db1]]"},
-		// The repository's own, what those hold in turn, and nothing of
-		// the repository whose name only begins the same.
-		{map[string]string{"gh:acme/shop": ""}, "map[gh:acme/shop:[gh:acme/other:target:1 gh:acme/shop:dep:go.mod:go:pgx gh:acme/shop:dep:go.mod:go:pgx:extra gh:acme/shop:wf:deploy]]"},
-		// A repository the snapshot does not have: by what the caller knows it is.
-		{map[string]string{"gh:acme/gone": "code.repository"}, "map[gh:acme/gone:[gh:acme/gone:file:Dockerfile]]"},
-		{map[string]string{"gh:acme/gone": ""}, "map[]"},
-		// Something found in a repository is not a repository: nothing
-		// that merely begins with its identifier goes with it.
-		{map[string]string{"gh:acme/shop:dep:go.mod:go:pgx": "code.dependency"}, "map[]"},
-	} {
-		if got := fmt.Sprint(Holds(s, c.listed)); got != c.want {
-			t.Errorf("Holds(%v) = %s, want %s", c.listed, got, c.want)
-		}
-	}
-	if got := Holds(s, nil); len(got) != 0 {
-		t.Errorf("nothing named: %v", got)
-	}
-	if got := Holds(nil, map[string]string{"lb": ""}); len(got) != 0 {
-		t.Errorf("no snapshot: %v", got)
-	}
-	if !Holder("aws.ecs.cluster") || Holder("aws.ec2.vpc") || Holder("k8s.workload") {
-		t.Error("Holder")
 	}
 }

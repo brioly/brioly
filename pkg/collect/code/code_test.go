@@ -409,3 +409,58 @@ func TestOwnerIsNotOverriddenByFilesThatLookLikeARepository(t *testing.T) {
 		t.Errorf("planted repository files changed the identity: %s", out)
 	}
 }
+
+// Everything found in a repository has an ID that begins with the
+// repository's and ":" (facts.InRepo): a caller that leaves a repository
+// out leaves its contents out by that alone. Two repositories whose names
+// begin the same keep their contents apart.
+func TestWhatIsFoundInARepositoryCarriesItsID(t *testing.T) {
+	collected := func(owner, name string) (string, []facts.Fact) {
+		res, err := Collect(Options{Path: writeFixture(t), Name: name, Owner: owner})
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo := ""
+		for _, f := range res.Facts {
+			if f.Kind == "code.repository" {
+				if repo != "" {
+					t.Fatalf("two repositories: %s, %s", repo, f.ID)
+				}
+				repo = f.ID
+			}
+		}
+		if repo == "" || len(res.Facts) < 5 {
+			t.Fatalf("the fixture gave %d facts and the repository %q", len(res.Facts), repo)
+		}
+		return repo, res.Facts
+	}
+	for _, owner := range []string{"acme", ""} {
+		app, inApp := collected(owner, "app")
+		app2, inApp2 := collected(owner, "app-2")
+		kinds := map[string]bool{}
+		for _, f := range inApp {
+			kinds[f.Kind] = true
+			if f.ID != app && !facts.InRepo(app, f.ID) {
+				t.Errorf("%s (%s) was found in %s and its ID does not say so", f.ID, f.Kind, app)
+			}
+			if f.ID == app2 || facts.InRepo(app2, f.ID) {
+				t.Errorf("%s reads as part of %s", f.ID, app2)
+			}
+		}
+		for _, f := range inApp2 {
+			if f.ID != app2 && !facts.InRepo(app2, f.ID) {
+				t.Errorf("%s (%s) was found in %s and its ID does not say so", f.ID, f.Kind, app2)
+			}
+			if f.ID == app || facts.InRepo(app, f.ID) {
+				t.Errorf("%s reads as part of %s, whose name only begins the same", f.ID, app)
+			}
+		}
+		// The fixture has every kind the collector makes.
+		for _, k := range []string{"code.dependency", "code.framework", "code.dockerfile", "code.ci_workflow", "code.deploy_target",
+			"iac.terraform.resource", "k8s.workload"} {
+			if !kinds[k] {
+				t.Errorf("the fixture has no %s: the check above says nothing of its IDs", k)
+			}
+		}
+	}
+}
