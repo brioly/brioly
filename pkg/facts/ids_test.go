@@ -41,6 +41,11 @@ func TestInRepo(t *testing.T) {
 		{"k8s:prod/shop", "k8s:prod/shop:x", false},
 		{"", ":file:x", false},
 		{"gh:", "gh::file:x", false},
+		// The ID of something found in a repository is not a repository's,
+		// so nothing is inside it, whatever kind it is said to be.
+		{app + ":dep", DependencyID(app, "go.mod", "go", "example.com/x"), false},
+		{FileID(app, "k8s"), FileID(app, "k8s") + ":x", false},
+		{"repo:shop:dep", "repo:shop:dep:go.mod:go:x", false},
 		{"repo:", "repo::file:x", false},
 	} {
 		if got := InRepo(c.repo, c.id); got != c.want {

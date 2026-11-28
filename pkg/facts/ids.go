@@ -26,7 +26,8 @@ func RepoID(owner, name string) string {
 // RepoPrefix returns what the ID of everything found in a repository begins
 // with: the repository's ID and ":" (FileID, DependencyID and every other ID
 // the code collector makes for what it finds in a repository). ok is false
-// when repoID does not have the form RepoID gives, and then nothing is
+// when repoID does not have the form RepoID gives, or has a ":" after the
+// form (the ID of something found in a repository), and then nothing is
 // inside it. Whether a fact is a repository is its kind: the form alone
 // does not say so (a file's ID has it too).
 //
@@ -38,6 +39,14 @@ func RepoID(owner, name string) string {
 func RepoPrefix(repoID string) (prefix string, ok bool) {
 	for _, form := range []string{"gh:", "repo:"} {
 		if len(repoID) > len(form) && strings.HasPrefix(repoID, form) {
+			// What is found in a repository has ":" after the repository's
+			// ID. An ID with one is therefore of something inside a
+			// repository, whatever kind it is said to be, and nothing is
+			// inside it: otherwise "gh:acme/app:dep", presented as a
+			// repository, would hold every dependency of gh:acme/app.
+			if strings.Contains(repoID[len(form):], ":") {
+				return "", false
+			}
 			return repoID + ":", true
 		}
 	}
