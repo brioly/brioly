@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -408,7 +407,11 @@ func Strip(snap *facts.Snapshot, connectors ...string) (removed int, err error) 
 // member is built without it. The argument is not changed.
 //
 // It is how a caller leaves out single resources it was told not to keep.
-// Coverage is left as it is: the scan did read those kinds, and what it
+// Exactly the named facts go: nothing is taken out because a named fact has
+// a relationship to it (a cluster's services stay when the cluster is
+// named). A caller that wants what was found in a repository to go with the
+// repository names those facts too; they are told by their identifiers
+// (facts.InRepo). Coverage is left as it is: the scan did read those kinds, and what it
 // read of the other resources stands. An identifier the snapshot does not
 // have is ignored.
 //
@@ -504,123 +507,4 @@ func strip(snap *facts.Snapshot, dropFact func(*facts.Fact) bool, dropCoverage f
 	}
 	keepClassification(out, original)
 	return removed, nil
-}
-
-// holders are the kinds of resource that hold others: what a "contains"
-// relationship from one of them leads to is part of it, and is left out
-// with it (Holds). The list is closed. A "contains" from any other kind
-// says something else (a VPC or a subnet is where a resource sits), and a
-// collector that starts to write the relationship for a new kind does not
-// thereby change what leaving a resource out takes with it.
-//
-//   - a load balancer holds its listeners, a listener its rules;
-//   - an RDS cluster holds its instances;
-//   - an ECS cluster holds its services;
-//   - an EKS cluster holds its node groups, a node group its Auto Scaling
-//     groups (not the workloads that run on the cluster);
-//   - a Route 53 hosted zone holds its records;
-//   - a Cloudflare zone holds its records and load balancers;
-//   - a repository holds what was found in it, a workflow its deploy
-//     targets.
-var holders = map[string]bool{
-	"aws.elbv2.load_balancer": true, "aws.elbv2.listener": true,
-	"aws.rds.cluster": true, "aws.ecs.cluster": true,
-	"aws.eks.cluster": true, "aws.eks.nodegroup": true,
-	"aws.route53.hosted_zone": true, "cloudflare.zone": true,
-	repositoryKind: true, "code.ci_workflow": true,
-}
-
-const repositoryKind = "code.repository"
-
-// Holder says whether a resource of the kind holds others (Holds).
-func Holder(kind string) bool { return holders[kind] }
-
-// Holds says what each of the named facts holds in the snapshot: for a
-// caller that leaves a resource out together with what belongs to it
-// (StripFacts). listed gives, for each identifier, the kind the caller
-// knows the fact to have, which is used when the snapshot does not have
-// the fact ("" when not known). The result has an entry for each named
-// fact that holds anything here: the identifiers of the facts it holds,
-// sorted, each once, itself not among them. Every identifier in the
-// result is of a fact the snapshot has.
-//
-// What a fact holds:
-//
-//   - what "contains" relationships lead to from it, and on from what is
-//     found, as long as the fact they start at is of a kind that holds
-//     (holders). A relationship that was inferred, or made by a grouping
-//     rule, is not followed;
-//   - for a repository, also every fact whose identifier begins with the
-//     repository's and ":" (facts.FileID and the like), and what those
-//     hold in turn. This is so also when the snapshot does not have the
-//     repository itself and listed says it is one.
-//
-// A fact that is not in the snapshot and is not a repository holds
-// nothing here: what it held when it was last seen is the caller's to
-// remember.
-func Holds(snap *facts.Snapshot, listed map[string]string) map[string][]string {
-	out := map[string][]string{}
-	if snap == nil || len(listed) == 0 {
-		return out
-	}
-	kind := make(map[string]string, len(snap.Facts))
-	for i := range snap.Facts {
-		kind[snap.Facts[i].ID] = snap.Facts[i].Kind
-	}
-	var held map[string][]string // by relationship, made when first needed
-	follow := func(id string) []string {
-		if !holders[kind[id]] {
-			return nil
-		}
-		if held == nil {
-			held = map[string][]string{}
-			for _, e := range snap.Edges {
-				if e.Type != facts.EdgeContains || !holders[kind[e.From]] || e.Derivation.Type == facts.Inferred || strings.HasPrefix(e.Derivation.Producer, "rule:") {
-					continue
-				}
-				if _, in := kind[e.To]; in {
-					held[e.From] = append(held[e.From], e.To)
-				}
-			}
-		}
-		return held[id]
-	}
-	for id, known := range listed {
-		if id == "" {
-			continue
-		}
-		k, in := kind[id]
-		if !in {
-			k = known
-		}
-		set := map[string]bool{}
-		queue := follow(id)
-		if k == repositoryKind {
-			prefix := id + ":"
-			for i := range snap.Facts {
-				if strings.HasPrefix(snap.Facts[i].ID, prefix) {
-					queue = append(queue, snap.Facts[i].ID)
-				}
-			}
-		}
-		for len(queue) > 0 {
-			next := queue[0]
-			queue = queue[1:]
-			if next == id || set[next] {
-				continue
-			}
-			set[next] = true
-			queue = append(queue, follow(next)...)
-		}
-		if len(set) == 0 {
-			continue
-		}
-		list := make([]string, 0, len(set))
-		for h := range set {
-			list = append(list, h)
-		}
-		sort.Strings(list)
-		out[id] = list
-	}
-	return out
 }
